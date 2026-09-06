@@ -25,6 +25,19 @@ def _known(value: str) -> bool:
     )
 
 
+def _public_url(*candidates: str) -> str:
+    """Return the first usable public link, never an extraction placeholder."""
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if not _known(value):
+            continue
+        if value.startswith(("https://", "http://")):
+            return value
+        if value.startswith("www."):
+            return f"https://{value}"
+    return ""
+
+
 def opportunity_categories(opportunity: dict[str, Any]) -> list[str]:
     text = " ".join((
         field_value(opportunity, "identity", "title"),
@@ -114,6 +127,11 @@ def opportunity_detail(match_item: dict[str, Any]) -> dict[str, Any]:
     requirements = opportunity.get("requirements", {})
     application = opportunity.get("application", {})
     source = opportunity.get("source", {})
+    application_url = _public_url(
+        field_value(application, "application_url"),
+        field_value(source, "official_url"),
+        match_item["listing_url"],
+    )
     return {
         "opportunity_id": match_item["opportunity_id"],
         "company": card["title"],
@@ -134,7 +152,7 @@ def opportunity_detail(match_item: dict[str, Any]) -> dict[str, Any]:
         },
         "application": {
             "method": field_value(application, "method") or "See the official listing",
-            "url": field_value(application, "application_url") or field_value(source, "official_url") or match_item["listing_url"],
+            "url": application_url,
             "email": field_value(application, "email"),
             "materials": _known_list(application, "materials"),
         },

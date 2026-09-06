@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from opportunity_presentation import opportunity_card
+from opportunity_presentation import opportunity_card, opportunity_detail
 
 
 class OpportunityPresentationTest(unittest.TestCase):
@@ -23,6 +23,19 @@ class OpportunityPresentationTest(unittest.TestCase):
         }
         card = opportunity_card(item)
         self.assertEqual(card["title"], "Dancers Who Sing Required For Broadway Musical")
+
+    def test_unknown_application_url_falls_back_to_the_listing_page(self) -> None:
+        item = {
+            "opportunity_id": "opportunity_1",
+            "listing_url": "https://example.org/audition",
+            "match": {"overall": {}},
+            "opportunity": {
+                "identity": {"title": {"value": "Audition"}},
+                "application": {"application_url": {"value": "unknown"}},
+                "source": {"official_url": {"value": "unknown"}},
+            },
+        }
+        self.assertEqual(opportunity_detail(item)["application"]["url"], "https://example.org/audition")
 
 
 if __name__ == "__main__":
