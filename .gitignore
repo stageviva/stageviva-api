@@ -1,0 +1,14 @@
+.env
+.venv/
+.venv-1/
+.venv.venv/
+__pycache__/
+*.py[cod]
+*.db
+data/
+test_cvs/
+artist_dna.json
+artist_test.json
+opportunity.json
+.pytest_cache/
+.DS_Store
