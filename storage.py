@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -78,6 +79,12 @@ class StageVivaStorage:
                 user_id TEXT PRIMARY KEY, status TEXT NOT NULL,
                 error TEXT, started_at TEXT NOT NULL, completed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS cv_upload_events (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cv_upload_events_user
+            ON cv_upload_events (user_id);
         """)
         self._ensure_column("notification_outbox", "read_at", "TEXT")
         self._ensure_column("notification_outbox", "email_sent_at", "TEXT")
@@ -89,6 +96,17 @@ class StageVivaStorage:
         self.connection.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_auth_id
             ON users(external_auth_id) WHERE external_auth_id IS NOT NULL
+        """)
+        # A user who already analysed a CV before this limit was introduced has
+        # used one upload.  This migration is idempotent and contains no CV
+        # content, only the existing job timestamp.
+        self.connection.execute("""
+            INSERT OR IGNORE INTO cv_upload_events (id, user_id, created_at)
+            SELECT 'legacy_cv_' || user_id, user_id, started_at FROM cv_analysis_jobs
+            WHERE NOT EXISTS (
+                SELECT 1 FROM cv_upload_events
+                WHERE cv_upload_events.user_id = cv_analysis_jobs.user_id
+            )
         """)
         self.connection.commit()
 
@@ -255,6 +273,29 @@ class StageVivaStorage:
         """, (user_id, now))
         self.connection.commit()
         return self.get_cv_analysis(user_id)  # type: ignore[return-value]
+
+    def cv_upload_count(self, user_id: str) -> int:
+        return int(self.connection.execute(
+            "SELECT COUNT(*) FROM cv_upload_events WHERE user_id = ?", (user_id,),
+        ).fetchone()[0])
+
+    def reserve_cv_upload(self, user_id: str, *, maximum: int = 2) -> bool:
+        """Atomically reserve one of a performer's limited CV analyses."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            if self.cv_upload_count(user_id) >= maximum:
+                self.connection.rollback()
+                return False
+            now = _utc_now()
+            self.connection.execute(
+                "INSERT INTO cv_upload_events (id, user_id, created_at) VALUES (?, ?, ?)",
+                (_stable_id("cv_upload", f"{user_id}:{now}:{uuid.uuid4().hex}"), user_id, now),
+            )
+            self.connection.commit()
+            return True
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def complete_cv_analysis(self, user_id: str, error: str | None = None) -> None:
         self.connection.execute("""

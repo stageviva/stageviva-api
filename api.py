@@ -634,13 +634,21 @@ async def upload_cv(
     content = await cv.read()
     if not content or len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CV must be between 1 byte and 10 MB.")
+    if not storage.reserve_cv_upload(user["id"], maximum=2):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="You have used both CV uploads. Please edit your performer profile to keep it up to date.",
+        )
     user_directory = UPLOADS_DIR / user["id"]
     user_directory.mkdir(parents=True, exist_ok=True)
     cv_path = user_directory / f"cv{suffix}"
     cv_path.write_bytes(content)
     job = storage.start_cv_analysis(user["id"])
     background_tasks.add_task(_analyse_uploaded_cv_in_background, user["id"], str(cv_path))
-    return {"status": job["status"], "started_at": job["started_at"]}
+    return {
+        "status": job["status"], "started_at": job["started_at"],
+        "uploads_used": storage.cv_upload_count(user["id"]), "uploads_remaining": 2 - storage.cv_upload_count(user["id"]),
+    }
 
 
 @app.get("/me/cv-analysis")
@@ -648,8 +656,10 @@ def get_cv_analysis(user: CurrentUser, storage: Storage) -> dict[str, Any]:
     """Polling endpoint for the setup screen; never keeps a browser request open."""
     job = storage.get_cv_analysis(user["id"])
     if not job:
-        return {"status": "not_started"}
+        return {"status": "not_started", "uploads_used": storage.cv_upload_count(user["id"]), "uploads_remaining": 2 - storage.cv_upload_count(user["id"])}
     response: dict[str, Any] = dict(job)
+    response["uploads_used"] = storage.cv_upload_count(user["id"])
+    response["uploads_remaining"] = max(0, 2 - response["uploads_used"])
     if job["status"] == "complete":
         artist = storage.get_artist_for_user(user["id"])
         response["artist_dna"] = _artist_dna_with_profile_questions(artist["dna"]) if artist else None
