@@ -25,6 +25,7 @@ from pydantic import BaseModel, EmailStr, Field
 from pwdlib import PasswordHash
 
 from artist_intelligence import analyse_artist, enrich_artist_dna
+from catalogue_seed import seed_catalogue_if_empty
 from match_service import match_artist_to_opportunity
 from opportunity_policy import is_stageviva_eligible
 from opportunity_presentation import matches_for_filters, opportunity_detail
@@ -255,6 +256,9 @@ async def lifespan(_: FastAPI):
     # CV instead of leaving the performer on a permanent loading screen.
     storage = StageVivaStorage(DATABASE_PATH)
     try:
+        seeded = seed_catalogue_if_empty(storage)
+        if seeded:
+            logger.info("Seeded %s validated opportunities for a new database", seeded)
         pending_users = storage.list_processing_cv_analyses()
     finally:
         storage.close()
