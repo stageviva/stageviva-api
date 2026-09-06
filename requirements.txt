@@ -10,3 +10,4 @@ openai
 python-dotenv
 pypdf
 python-dateutil==2.9.0.post0
+requests
