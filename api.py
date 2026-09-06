@@ -260,6 +260,7 @@ async def lifespan(_: FastAPI):
         if seeded:
             logger.info("Seeded %s validated opportunities for a new database", seeded)
         pending_users = storage.list_processing_cv_analyses()
+        artists_to_refresh = storage.list_registered_artists() if seeded else []
     finally:
         storage.close()
     for user_id in pending_users:
@@ -270,6 +271,14 @@ async def lifespan(_: FastAPI):
                 target=_analyse_uploaded_cv_in_background,
                 args=(user_id, str(files[0])), daemon=True,
             ).start()
+    # A performer may upload their CV just before the first catalogue is
+    # available. Refresh those stored profiles after seeding so they are not
+    # asked to upload the same CV again.
+    for artist_id, artist_dna in artists_to_refresh:
+        threading.Thread(
+            target=_refresh_existing_artist_matches,
+            args=(artist_id, artist_dna), daemon=True,
+        ).start()
     yield
 
 
@@ -431,8 +440,9 @@ def get_profile_questions(user: CurrentUser, storage: Storage) -> dict[str, Any]
     return {"questions": _matching_profile_questions(artist["dna"])}
 
 
-def _store_and_match_artist(user_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage) -> dict[str, int]:
-    artist_id = storage.upsert_artist_for_user(user_id, artist_dna)
+def _match_artist_against_catalogue(
+    artist_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage,
+) -> dict[str, int]:
     matched = queued = 0
     opportunities = storage.list_opportunity_dnas()
 
@@ -460,6 +470,22 @@ def _store_and_match_artist(user_id: str, artist_dna: dict[str, Any], storage: S
         if result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
             queued += int(storage.queue_notification(artist_id, opportunity_id, result))
     return {"matched_opportunities": matched, "queued_notifications": queued}
+
+
+def _store_and_match_artist(user_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage) -> dict[str, int]:
+    artist_id = storage.upsert_artist_for_user(user_id, artist_dna)
+    return _match_artist_against_catalogue(artist_id, artist_dna, storage)
+
+
+def _refresh_existing_artist_matches(artist_id: str, artist_dna: dict[str, Any]) -> None:
+    """Populate matches when a fresh database receives its first catalogue."""
+    storage = StageVivaStorage(DATABASE_PATH)
+    try:
+        _match_artist_against_catalogue(artist_id, artist_dna, storage)
+    except Exception:
+        logger.exception("Catalogue refresh failed for artist %s", artist_id)
+    finally:
+        storage.close()
 
 
 def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
