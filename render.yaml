@@ -12,3 +12,5 @@ services:
         value: /var/data/stageviva.db
       - key: STAGEVIVA_UPLOADS_DIR
         value: /var/data/uploads
+      - key: STAGEVIVA_DAILY_SOURCE_LIMIT
+        value: "5"

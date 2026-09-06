@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import hmac
 import logging
 import json
 import threading
@@ -18,7 +19,7 @@ from urllib.request import Request, urlopen
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
@@ -44,6 +45,7 @@ SUPPORTED_EXTERNAL_JWT_ALGORITHMS = frozenset({
     "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA",
 })
 MEMBERSHIP_TIERS = frozenset({"beta", "free", "pro", "school"})
+source_scan_lock = threading.Lock()
 
 
 class RegisterRequest(BaseModel):
@@ -488,6 +490,25 @@ def _refresh_existing_artist_matches(artist_id: str, artist_dna: dict[str, Any])
         storage.close()
 
 
+def _run_daily_source_scan() -> None:
+    """Run the live discovery pipeline on the web service's persistent data."""
+    try:
+        # Imported lazily to keep normal API boot lightweight.
+        from daily_pipeline import run_daily_pipeline
+
+        limit = int(os.getenv("STAGEVIVA_DAILY_SOURCE_LIMIT", "5"))
+        storage = StageVivaStorage(DATABASE_PATH)
+        try:
+            result = run_daily_pipeline(storage, limit_per_source=max(1, limit))
+            logger.info("Daily source scan completed: %s", result)
+        finally:
+            storage.close()
+    except Exception:
+        logger.exception("Daily source scan failed")
+    finally:
+        source_scan_lock.release()
+
+
 def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
     """Finish a CV analysis after the browser has received its 202 response."""
     storage = StageVivaStorage(DATABASE_PATH)
@@ -633,6 +654,23 @@ def get_cv_analysis(user: CurrentUser, storage: Storage) -> dict[str, Any]:
         artist = storage.get_artist_for_user(user["id"])
         response["artist_dna"] = _artist_dna_with_profile_questions(artist["dna"]) if artist else None
     return response
+
+
+@app.post("/internal/daily-source-scan", status_code=status.HTTP_202_ACCEPTED)
+def trigger_daily_source_scan(
+    scheduler_secret: Annotated[str | None, Header(alias="X-StageViva-Scheduler-Secret")] = None,
+) -> dict[str, str]:
+    """Securely start the daily catalogue refresh from Render Cron."""
+    configured_secret = os.getenv("STAGEVIVA_SCHEDULER_SECRET")
+    if not configured_secret:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Scheduler is not configured.")
+    if not scheduler_secret or not hmac.compare_digest(scheduler_secret, configured_secret):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid scheduler credential.")
+    if not source_scan_lock.acquire(blocking=False):
+        return {"status": "already_running"}
+
+    threading.Thread(target=_run_daily_source_scan, daemon=True).start()
+    return {"status": "started"}
 
 
 @app.get("/matches")
