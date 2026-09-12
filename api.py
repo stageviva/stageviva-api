@@ -38,8 +38,22 @@ from storage import StageVivaStorage
 
 load_dotenv()
 
-DATABASE_PATH = os.getenv("STAGEVIVA_DB", "stageviva.db")
-UPLOADS_DIR = Path(os.getenv("STAGEVIVA_UPLOADS_DIR", "data/uploads"))
+def _persistent_runtime_path(filename: str, environment_key: str, local_default: str) -> str:
+    """Prefer Render's attached disk whenever it is available.
+
+    Frontend deployments must never be able to leave the API writing profiles
+    or CVs to the service's disposable working directory. Render mounts the
+    production disk at ``/var/data``; local development continues to honour
+    the configured path or the ordinary project-relative default.
+    """
+    disk_directory = Path("/var/data")
+    if disk_directory.is_dir():
+        return str(disk_directory / filename)
+    return os.getenv(environment_key, local_default)
+
+
+DATABASE_PATH = _persistent_runtime_path("stageviva.db", "STAGEVIVA_DB", "stageviva.db")
+UPLOADS_DIR = Path(_persistent_runtime_path("uploads", "STAGEVIVA_UPLOADS_DIR", "data/uploads"))
 TOKEN_LIFETIME_SECONDS = 60 * 60 * 24 * 14
 password_hasher = PasswordHash.recommended()
 bearer_scheme = HTTPBearer(auto_error=False)
