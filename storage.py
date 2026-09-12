@@ -58,7 +58,7 @@ class StageVivaStorage:
                 id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL, display_name TEXT NOT NULL,
                 profile_json TEXT NOT NULL DEFAULT '{}', artist_id TEXT,
-                membership_tier TEXT NOT NULL DEFAULT 'beta',
+                membership_tier TEXT NOT NULL DEFAULT 'free',
                 email_notifications INTEGER NOT NULL DEFAULT 1,
                 in_app_notifications INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -98,9 +98,10 @@ class StageVivaStorage:
         self._ensure_column("notification_outbox", "read_at", "TEXT")
         self._ensure_column("notification_outbox", "email_sent_at", "TEXT")
         self._ensure_column("users", "external_auth_id", "TEXT")
-        # Every existing tester stays on the beta entitlement.  New public
-        # accounts will switch to the free tier when billing launches.
-        self._ensure_column("users", "membership_tier", "TEXT NOT NULL DEFAULT 'beta'")
+        # Existing beta testers keep their entitlement. New accounts are
+        # explicitly created as Free below, regardless of an old SQLite column
+        # default left behind by a prior deployment.
+        self._ensure_column("users", "membership_tier", "TEXT NOT NULL DEFAULT 'free'")
         self._ensure_column("opportunities", "visible", "INTEGER NOT NULL DEFAULT 1")
         self.connection.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_auth_id
@@ -266,8 +267,8 @@ class StageVivaStorage:
         now = _utc_now()
         try:
             self.connection.execute("""
-                INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO users (id, email, password_hash, display_name, membership_tier, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'free', ?, ?)
             """, (user_id, email.lower(), password_hash, display_name, now, now))
             self.connection.commit()
         except sqlite3.IntegrityError as error:
@@ -317,8 +318,8 @@ class StageVivaStorage:
         now = _utc_now()
         self.connection.execute("""
             INSERT INTO users (
-                id, email, password_hash, display_name, external_auth_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, email, password_hash, display_name, external_auth_id, membership_tier, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'free', ?, ?)
         """, (user_id, safe_email, "external-auth-managed", safe_name, external_auth_id, now, now))
         self.connection.commit()
         return self.get_user(user_id)  # type: ignore[return-value]
@@ -346,13 +347,31 @@ class StageVivaStorage:
         self.connection.commit()
         return self.get_user(user_id)  # type: ignore[return-value]
 
-    def update_membership_tier(self, user_id: str, membership_tier: str) -> dict[str, Any]:
+    def update_membership_tier(self, user_id: str, membership_tier: str) -> dict[str, Any] | None:
         """Internal billing boundary; Stripe/App Store wiring will call this later."""
         self.connection.execute("""
             UPDATE users SET membership_tier = ?, updated_at = ? WHERE id = ?
         """, (membership_tier, _utc_now(), user_id))
         self.connection.commit()
-        return self.get_user(user_id)  # type: ignore[return-value]
+        return self.get_user(user_id)
+
+    def list_performers_for_admin(self) -> list[dict[str, Any]]:
+        """Return the creator's private profile overview without account secrets or CV files."""
+        rows = self.connection.execute("""
+            SELECT users.id, users.email, users.display_name, users.profile_json,
+                   users.membership_tier, users.artist_id, users.created_at, users.updated_at,
+                   artists.dna_json
+            FROM users LEFT JOIN artists ON artists.id = users.artist_id
+            ORDER BY users.updated_at DESC
+        """).fetchall()
+        performers: list[dict[str, Any]] = []
+        for row in rows:
+            performer = dict(row)
+            performer["profile"] = json.loads(performer.pop("profile_json"))
+            raw_dna = performer.pop("dna_json")
+            performer["artist_dna"] = json.loads(raw_dna) if raw_dna else None
+            performers.append(performer)
+        return performers
 
     def start_cv_analysis(self, user_id: str) -> dict[str, Any]:
         now = _utc_now()

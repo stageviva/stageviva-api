@@ -117,6 +117,11 @@ class AdminManualOpportunityRequest(BaseModel):
     description: str = Field(default="", max_length=3000)
 
 
+class AdminMembershipUpdateRequest(BaseModel):
+    """Creator-controlled complimentary access during the beta."""
+    membership_tier: str = Field(pattern="^(free|beta|pro|school)$")
+
+
 class ArtistDNARequest(BaseModel):
     artist_dna: dict[str, Any]
 
@@ -960,6 +965,25 @@ def admin_operations(admin: AdminUser, storage: Storage) -> dict[str, Any]:
             "error": latest.get("error") if latest else None,
         })
     return {"sources": source_health, "backups": list_database_backups(DATABASE_PATH)}
+
+
+@app.get("/admin/performers")
+def admin_list_performers(admin: AdminUser, storage: Storage) -> list[dict[str, Any]]:
+    """Private creator overview. It exposes profiles, never passwords or CV files."""
+    return storage.list_performers_for_admin()
+
+
+@app.patch("/admin/performers/{user_id}/membership")
+def admin_update_performer_membership(
+    user_id: str, payload: AdminMembershipUpdateRequest, admin: AdminUser, storage: Storage,
+) -> dict[str, Any]:
+    updated = storage.update_membership_tier(user_id, payload.membership_tier)
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Performer not found.")
+    return {
+        "id": updated["id"], "email": updated["email"], "display_name": updated["display_name"],
+        "membership_tier": _membership_tier(updated), "access": _access_for_user(updated),
+    }
 
 
 @app.patch("/admin/opportunities/{opportunity_id}")
