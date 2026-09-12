@@ -79,6 +79,13 @@ class PushSubscriptionRequest(BaseModel):
 
 class AdminOpportunityUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
+    organisation: str | None = Field(default=None, min_length=1, max_length=240)
+    role_summary: str | None = Field(default=None, min_length=1, max_length=500)
+    location: str | None = Field(default=None, min_length=1, max_length=240)
+    deadline: str | None = Field(default=None, min_length=1, max_length=120)
+    official_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    contract_type: str | None = Field(default=None, min_length=1, max_length=240)
+    description: str | None = Field(default=None, max_length=3000)
     visible: bool | None = None
 
 
@@ -519,6 +526,20 @@ def _match_artist_against_catalogue(
     return {"matched_opportunities": matched, "queued_notifications": queued}
 
 
+def _match_opportunity_against_registered_artists(
+    opportunity_id: str, opportunity: dict[str, Any], storage: StageVivaStorage,
+) -> dict[str, int]:
+    """Refresh all scores after an owner adds or materially corrects a listing."""
+    matched = queued = 0
+    for artist_id, artist_dna in storage.list_registered_artists():
+        result = match_artist_to_opportunity(artist_dna, opportunity)
+        storage.upsert_match(artist_id, opportunity_id, result)
+        matched += 1
+        if result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
+            queued += int(storage.queue_notification(artist_id, opportunity_id, result))
+    return {"matched_artists": matched, "queued_notifications": queued}
+
+
 def _store_and_match_artist(user_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage) -> dict[str, int]:
     artist_id = storage.upsert_artist_for_user(user_id, artist_dna)
     return _match_artist_against_catalogue(artist_id, artist_dna, storage)
@@ -786,15 +807,27 @@ def admin_list_opportunities(admin: AdminUser, storage: Storage) -> list[dict[st
 @app.patch("/admin/opportunities/{opportunity_id}")
 def admin_update_opportunity(
     opportunity_id: str, payload: AdminOpportunityUpdateRequest, admin: AdminUser, storage: Storage,
-) -> dict[str, bool]:
+) -> dict[str, Any]:
     changed = False
-    if payload.title is not None:
-        changed = storage.update_opportunity_title(opportunity_id, payload.title.strip()) or changed
+    fields = {
+        key: value.strip()
+        for key, value in payload.model_dump(exclude={"visible"}, exclude_none=True).items()
+    }
+    if payload.official_url is not None and not payload.official_url.startswith(("https://", "http://")):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Use the official http(s) listing URL.")
+    updated_opportunity = storage.update_opportunity_details(opportunity_id, fields) if fields else None
+    if updated_opportunity is not None:
+        changed = True
     if payload.visible is not None:
         changed = storage.set_opportunity_visibility(opportunity_id, payload.visible) or changed
     if not changed and not any(item["id"] == opportunity_id for item in storage.list_all_opportunities()):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
-    return {"ok": True}
+    match_result = (
+        _match_opportunity_against_registered_artists(opportunity_id, updated_opportunity, storage)
+        if updated_opportunity is not None else {"matched_artists": 0, "queued_notifications": 0}
+    )
+    return {"ok": True, **match_result}
 
 
 @app.post("/admin/opportunities", status_code=status.HTTP_201_CREATED)
@@ -825,14 +858,7 @@ def admin_add_opportunity(
         payload.official_url.strip(), "manual", description=payload.description.strip(),
     )
     opportunity_id = storage.upsert_opportunity(item, opportunity)
-    matched = queued = 0
-    for artist_id, artist_dna in storage.list_registered_artists():
-        result = match_artist_to_opportunity(artist_dna, opportunity)
-        storage.upsert_match(artist_id, opportunity_id, result)
-        matched += 1
-        if result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
-            queued += int(storage.queue_notification(artist_id, opportunity_id, result))
-    return {"id": opportunity_id, "matched_artists": matched, "queued_notifications": queued}
+    return {"id": opportunity_id, **_match_opportunity_against_registered_artists(opportunity_id, opportunity, storage)}
 
 
 @app.get("/notifications")

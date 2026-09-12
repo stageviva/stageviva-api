@@ -178,6 +178,53 @@ class StageVivaStorage:
         self.connection.commit()
         return True
 
+    def update_opportunity_details(self, opportunity_id: str, updates: dict[str, str]) -> dict[str, Any] | None:
+        """Update the editable editorial fields while retaining raw import history."""
+        row = self.connection.execute(
+            "SELECT opportunity_json FROM opportunities WHERE id = ?", (opportunity_id,),
+        ).fetchone()
+        if not row:
+            return None
+        opportunity = json.loads(row["opportunity_json"])
+
+        def set_value(path: tuple[str, ...], value: str) -> None:
+            target: dict[str, Any] = opportunity
+            for key in path[:-1]:
+                child = target.get(key)
+                if not isinstance(child, dict):
+                    child = {}
+                    target[key] = child
+                target = child
+            field = target.get(path[-1])
+            if isinstance(field, dict):
+                field["value"] = value
+            else:
+                target[path[-1]] = {"value": value}
+
+        paths = {
+            "title": ("identity", "title"),
+            "organisation": ("identity", "organisation"),
+            "role_summary": ("identity", "opportunity_type"),
+            "description": ("identity", "description"),
+            "location": ("location", "city"),
+            "deadline": ("dates", "application_deadline"),
+            "contract_type": ("contract_and_compensation", "contract_type"),
+            "official_url": ("application", "application_url"),
+        }
+        for key, value in updates.items():
+            if key in paths:
+                set_value(paths[key], value)
+        if "official_url" in updates:
+            set_value(("source", "official_url"), updates["official_url"])
+        title = updates.get("title") or str(
+            opportunity.get("identity", {}).get("title", {}).get("value") or "Untitled opportunity"
+        )
+        self.connection.execute("""
+            UPDATE opportunities SET title = ?, opportunity_json = ?, updated_at = ? WHERE id = ?
+        """, (title, json.dumps(opportunity, ensure_ascii=False), _utc_now(), opportunity_id))
+        self.connection.commit()
+        return opportunity
+
     def list_all_opportunities(self) -> list[dict[str, Any]]:
         rows = self.connection.execute("""
             SELECT id, listing_url, title, source_name, source_url, category, visible,

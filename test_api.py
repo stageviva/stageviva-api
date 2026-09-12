@@ -96,6 +96,16 @@ class ApiTest(unittest.TestCase):
             listing = self.client.get("/admin/opportunities", headers=headers).json()[0]
             self.assertEqual(listing["title"], "Example Ballet — paid company contract")
             self.assertFalse(listing["visible"])
+            details = self.client.patch(f"/admin/opportunities/{opportunity_id}", headers=headers, json={
+                "description": "Updated paid employment description.",
+                "official_url": "https://example.org/updated-audition",
+                "deadline": "1 January 2100",
+            })
+            self.assertEqual(details.status_code, 200, details.text)
+            listing = self.client.get("/admin/opportunities", headers=headers).json()[0]
+            opportunity = listing["opportunity"]
+            self.assertEqual(opportunity["identity"]["description"]["value"], "Updated paid employment description.")
+            self.assertEqual(opportunity["application"]["application_url"]["value"], "https://example.org/updated-audition")
 
     def test_lovable_session_creates_and_reuses_one_stageviva_user(self) -> None:
         claims = {
