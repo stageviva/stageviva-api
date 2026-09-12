@@ -342,6 +342,15 @@ async def lifespan(_: FastAPI):
                 target=_analyse_uploaded_cv_in_background,
                 args=(user_id, str(files[0])), daemon=True,
             ).start()
+    # Headshot extraction was introduced after some beta CVs had already been
+    # analysed. Backfill those private uploads once, without asking anyone to
+    # spend one of their two CV uploads again.
+    for user_directory in UPLOADS_DIR.iterdir():
+        if user_directory.is_dir():
+            threading.Thread(
+                target=_backfill_cv_headshot,
+                args=(user_directory.name,), daemon=True,
+            ).start()
     # A performer may upload their CV just before the first catalogue is
     # available. Refresh those stored profiles after seeding so they are not
     # asked to upload the same CV again.
@@ -641,6 +650,46 @@ def _headshot_path(user_id: str) -> Path:
     return UPLOADS_DIR / user_id / "headshot.jpg"
 
 
+def _headshot_check_marker(user_id: str) -> Path:
+    """Remember that this uploaded CV has already been assessed for a portrait."""
+    return UPLOADS_DIR / user_id / ".headshot_checked"
+
+
+def _mark_headshot_checked(user_id: str) -> None:
+    marker = _headshot_check_marker(user_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+
+def _set_cv_headshot_available(user_id: str, artist_dna: dict[str, Any]) -> None:
+    physical = artist_dna.setdefault("physical", {})
+    physical["headshot_available"] = True
+    physical["source"] = "cv"
+
+
+def _backfill_cv_headshot(user_id: str) -> None:
+    """Inspect one older CV once, keeping existing profiles and uploads intact."""
+    headshot_path = _headshot_path(user_id)
+    if headshot_path.is_file() or _headshot_check_marker(user_id).is_file():
+        return
+    user_directory = UPLOADS_DIR / user_id
+    files = sorted(user_directory.glob("cv.*"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not files:
+        return
+    found = extract_cv_headshot(files[0], headshot_path)
+    _mark_headshot_checked(user_id)
+    if not found and not headshot_path.is_file():
+        return
+    storage = StageVivaStorage(DATABASE_PATH)
+    try:
+        artist = storage.get_artist_for_user(user_id)
+        if artist:
+            _set_cv_headshot_available(user_id, artist["dna"])
+            storage.upsert_artist_for_user(user_id, artist["dna"])
+    finally:
+        storage.close()
+
+
 def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
     """Finish a CV analysis after the browser has received its 202 response."""
     storage = StageVivaStorage(DATABASE_PATH)
@@ -651,9 +700,8 @@ def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
         # A prior confirmed CV headshot remains private and available if a
         # later text-only CV contains no new portrait.
         if found_new_headshot or headshot_path.is_file():
-            physical = artist_dna.setdefault("physical", {})
-            physical["headshot_available"] = True
-            physical["source"] = "cv"
+            _set_cv_headshot_available(user_id, artist_dna)
+        _mark_headshot_checked(user_id)
         _store_and_match_artist(user_id, artist_dna, storage)
         storage.complete_cv_analysis(user_id)
     except Exception as error:
@@ -798,6 +846,9 @@ async def upload_cv(
     user_directory.mkdir(parents=True, exist_ok=True)
     cv_path = user_directory / f"cv{suffix}"
     cv_path.write_bytes(content)
+    # A replacement CV deserves a fresh portrait check, even if an earlier
+    # upload had no usable headshot.
+    _headshot_check_marker(user["id"]).unlink(missing_ok=True)
     job = storage.start_cv_analysis(user["id"])
     background_tasks.add_task(_analyse_uploaded_cv_in_background, user["id"], str(cv_path))
     return {
