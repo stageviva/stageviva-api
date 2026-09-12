@@ -183,6 +183,27 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["artist_dna"]["identity"]["gender"], "female")
 
+    def test_private_headshot_is_available_after_cv_analysis(self) -> None:
+        token = self.register("headshot@example.com", "Headshot Artist")
+        headers = {"Authorization": f"Bearer {token}"}
+        cv_file = ("artist.pdf", b"pretend-pdf", "application/pdf")
+        with patch.object(api, "analyse_artist", return_value={"identity": {"name": "Headshot Artist"}}), patch.object(
+            api, "extract_cv_headshot",
+        ) as extract:
+            def save_headshot(_cv_path: str, destination: Path) -> bool:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"jpeg-data")
+                return True
+
+            extract.side_effect = save_headshot
+            response = self.client.post("/me/cv", headers=headers, files={"cv": cv_file})
+        self.assertEqual(response.status_code, 202, response.text)
+        headshot = self.client.get("/me/headshot", headers=headers)
+        self.assertEqual(headshot.status_code, 200, headshot.text)
+        self.assertEqual(headshot.headers["content-type"], "image/jpeg")
+        dna = self.client.get("/me/artist-dna", headers=headers)
+        self.assertTrue(dna.json()["dna"]["physical"]["headshot_available"])
+
     def test_matching_profile_questions_are_short_and_structured(self) -> None:
         token = self.register("questions@example.com", "Question Artist")
         headers = {"Authorization": f"Bearer {token}"}

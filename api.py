@@ -21,11 +21,13 @@ import jwt
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
 from pwdlib import PasswordHash
 
 from artist_intelligence import analyse_artist, enrich_artist_dna
+from cv_headshot import extract_cv_headshot
 from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
 from match_service import match_artist_to_opportunity
@@ -634,11 +636,24 @@ def _run_daily_source_scan() -> None:
         source_scan_lock.release()
 
 
+def _headshot_path(user_id: str) -> Path:
+    """The only private on-disk headshot location for one performer."""
+    return UPLOADS_DIR / user_id / "headshot.jpg"
+
+
 def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
     """Finish a CV analysis after the browser has received its 202 response."""
     storage = StageVivaStorage(DATABASE_PATH)
     try:
         artist_dna = analyse_artist(cv_path)
+        headshot_path = _headshot_path(user_id)
+        found_new_headshot = extract_cv_headshot(cv_path, headshot_path)
+        # A prior confirmed CV headshot remains private and available if a
+        # later text-only CV contains no new portrait.
+        if found_new_headshot or headshot_path.is_file():
+            physical = artist_dna.setdefault("physical", {})
+            physical["headshot_available"] = True
+            physical["source"] = "cv"
         _store_and_match_artist(user_id, artist_dna, storage)
         storage.complete_cv_analysis(user_id)
     except Exception as error:
@@ -651,6 +666,18 @@ def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
 @app.put("/me/artist-dna")
 def save_artist_dna(payload: ArtistDNARequest, user: CurrentUser, storage: Storage) -> dict[str, Any]:
     return _store_and_match_artist(user["id"], payload.artist_dna, storage)
+
+
+@app.get("/me/headshot")
+def get_headshot(user: CurrentUser) -> FileResponse:
+    """Return the signed-in performer's private CV headshot, if one exists."""
+    headshot = _headshot_path(user["id"])
+    if not headshot.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No headshot is available yet.")
+    return FileResponse(
+        headshot, media_type="image/jpeg", filename="stageviva-headshot.jpg",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 def _deep_merge(existing: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
