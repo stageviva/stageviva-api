@@ -31,7 +31,7 @@ from match_service import match_artist_to_opportunity
 from opportunity_policy import is_stageviva_eligible
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_presentation import matches_for_filters, opportunity_detail
-from push_notifications import deliver_pending_push_notifications, public_vapid_key
+from push_notifications import deliver_pending_push_notifications, public_vapid_key, send_test_push_notification
 from source_registry import get_active_sources
 from storage import StageVivaStorage
 
@@ -778,3 +778,8 @@ def save_push_subscription(payload: PushSubscriptionRequest, user: CurrentUser, 
 @app.delete("/me/push-subscriptions", status_code=status.HTTP_204_NO_CONTENT)
 def remove_push_subscription(payload: PushSubscriptionRequest, user: CurrentUser, storage: Storage) -> None:
     storage.remove_push_subscription(user["id"], payload.endpoint)
+
+
+@app.post("/me/push-subscriptions/test")
+def test_push_subscription(user: CurrentUser, storage: Storage) -> dict[str, int]:
+    return send_test_push_notification(storage, user["id"])

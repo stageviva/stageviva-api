@@ -67,3 +67,27 @@ def public_vapid_key(storage: StageVivaStorage) -> str:
     key = ec.derive_private_key(private_number, ec.SECP256R1())
     public_raw = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
     return base64.urlsafe_b64encode(public_raw).decode().rstrip("=")
+
+
+def send_test_push_notification(storage: StageVivaStorage, user_id: str) -> dict[str, int]:
+    """Send a user-requested test only to the caller's own registered devices."""
+    private_key = storage.get_or_create_setting("web_push_vapid_private_key", _new_vapid_private_key)
+    sent = 0
+    for item in storage.list_push_subscriptions_for_user(user_id):
+        try:
+            webpush(
+                subscription_info=item["subscription"],
+                data=json.dumps({
+                    "title": "StageViva notifications are on",
+                    "body": "You will hear about new matches here.",
+                    "url": "/matches",
+                    "tag": "stageviva-test",
+                }),
+                vapid_private_key=private_key,
+                vapid_claims={"sub": "mailto:hello@stageviva.com"},
+            )
+            sent += 1
+        except WebPushException as error:
+            if getattr(getattr(error, "response", None), "status_code", None) in {404, 410}:
+                storage.remove_push_subscription_by_id(item["id"])
+    return {"sent": sent}

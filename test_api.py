@@ -63,6 +63,7 @@ class ApiTest(unittest.TestCase):
             "endpoint": "https://push.example.test/subscription/123",
             "keys": {"p256dh": "browser-public-key", "auth": "browser-auth-key"},
         }
+        self.assertEqual(self.client.post("/me/push-subscriptions/test", headers=headers).json(), {"sent": 0})
         saved = self.client.post("/me/push-subscriptions", headers=headers, json=subscription)
         self.assertEqual(saved.status_code, 204, saved.text)
         removed = self.client.request("DELETE", "/me/push-subscriptions", headers=headers, json=subscription)

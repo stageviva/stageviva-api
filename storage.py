@@ -444,6 +444,12 @@ class StageVivaStorage:
         self.connection.commit()
         return cursor.rowcount == 1
 
+    def list_push_subscriptions_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("""
+            SELECT id, subscription_json FROM push_subscriptions WHERE user_id = ?
+        """, (user_id,)).fetchall()
+        return [{"id": row["id"], "subscription": json.loads(row["subscription_json"])} for row in rows]
+
     def pending_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.connection.execute("""
             SELECT notification_outbox.id AS notification_id, notification_outbox.match_json,
