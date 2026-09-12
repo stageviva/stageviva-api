@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
+
+
+_DIRECTORY_DOMAINS = frozenset({
+    "balletplaces.com", "danceeurope.net", "ballee.co", "entertainersworldwidejobs.com", "allcasting.com",
+})
 
 
 def field_value(document: dict[str, Any], *path: str) -> str:
@@ -38,18 +44,38 @@ def _public_url(*candidates: str) -> str:
     return ""
 
 
+def _is_directory_url(url: str) -> bool:
+    host = urlparse(str(url or "")).hostname or ""
+    host = host.lower().removeprefix("www.")
+    return host in _DIRECTORY_DOMAINS
+
+
 def opportunity_categories(opportunity: dict[str, Any]) -> list[str]:
+    requirements = opportunity.get("requirements", {})
+    discipline_requirements = requirements.get("discipline_requirements", {}) if isinstance(requirements, dict) else {}
+    styles = _known_list(requirements, "styles")
+    demonstrated_disciplines = [
+        str(name).replace("_", " ")
+        for name, requirement in discipline_requirements.items()
+        if isinstance(requirement, dict) and _known(str(requirement.get("required_level", "")))
+    ] if isinstance(discipline_requirements, dict) else []
     text = " ".join((
         field_value(opportunity, "identity", "title"),
         field_value(opportunity, "identity", "opportunity_type"),
         field_value(opportunity, "identity", "description"),
         field_value(opportunity, "contract_and_compensation", "contract_type"),
+        " ".join(styles),
+        " ".join(demonstrated_disciplines),
     )).lower()
     categories: list[str] = []
     rules = {
         "ballet": ("ballet",),
         "contemporary": ("contemporary",),
+        "jazz": ("jazz",),
+        "commercial": ("commercial",),
+        "hip_hop": ("hip hop", "hip-hop"),
         "musical_theatre": ("musical", "broadway", "singer-actor", "dancer-singer"),
+        "tap": ("tap",),
         "cruise": ("cruise", "at sea", "onboard"),
         "acting": ("actor", "acting", "screen", "series", "film", "extras"),
         "singing": ("singer", "vocalist", "vocal"),
@@ -131,8 +157,12 @@ def opportunity_detail(match_item: dict[str, Any]) -> dict[str, Any]:
     application_url = _public_url(
         field_value(application, "application_url"),
         field_value(source, "official_url"),
-        match_item["listing_url"],
     )
+    # An audition-directory page is useful during import, but it is not the
+    # performer's official application destination. Only fall back to the
+    # original listing when it is already a company/casting-site URL.
+    if not application_url and not _is_directory_url(match_item["listing_url"]):
+        application_url = _public_url(match_item["listing_url"])
     return {
         "opportunity_id": match_item["opportunity_id"],
         "company": card["title"],

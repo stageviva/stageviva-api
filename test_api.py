@@ -242,6 +242,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(access.json()["opportunities"]["release"], "immediate")
         self.assertTrue(access.json()["opportunities"]["show_full_details"])
 
+    def test_cv_insights_are_a_premium_benefit(self) -> None:
+        token = self.register("insights@example.com", "Insight Artist")
+        headers = {"Authorization": f"Bearer {token}"}
+        self.client.put("/me/artist-dna", headers=headers, json={
+            "artist_dna": {"identity": {"name": "Insight Artist"}, "physical": {"headshot_available": False}},
+        })
+        self.assertEqual(self.client.get("/me/cv-insights", headers=headers).status_code, 403)
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            storage.update_membership_tier(self.client.get("/me", headers=headers).json()["id"], "beta")
+        finally:
+            storage.close()
+        response = self.client.get("/me/cv-insights", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("Headshot", [item["area"] for item in response.json()["items"]])
+
     def test_free_access_is_ready_for_the_weekly_release_model(self) -> None:
         token = self.register("free@example.com", "Free Artist")
         headers = {"Authorization": f"Bearer {token}"}

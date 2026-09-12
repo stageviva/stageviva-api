@@ -37,6 +37,19 @@ class OpportunityPresentationTest(unittest.TestCase):
         }
         self.assertEqual(opportunity_detail(item)["application"]["url"], "https://example.org/audition")
 
+    def test_directory_listing_is_not_presented_as_an_official_apply_link(self) -> None:
+        item = {
+            "opportunity_id": "opportunity_1",
+            "listing_url": "https://balletplaces.com/auditions/example",
+            "match": {"overall": {}},
+            "opportunity": {
+                "identity": {"title": {"value": "Audition"}},
+                "application": {"application_url": {"value": "unknown"}},
+                "source": {"official_url": {"value": "unknown"}},
+            },
+        }
+        self.assertEqual(opportunity_detail(item)["application"]["url"], "")
+
     def test_representation_listings_are_an_agency_category(self) -> None:
         item = {
             "opportunity": {"identity": {
@@ -48,6 +61,21 @@ class OpportunityPresentationTest(unittest.TestCase):
             "match": {"overall": {}},
         }
         self.assertIn("agency", opportunity_card(item)["categories"])
+
+    def test_categories_use_structured_requirements_not_only_the_title(self) -> None:
+        item = {
+            "opportunity": {
+                "identity": {"organisation": {"value": "Example Dance"}, "title": {"value": "Company audition"}},
+                "requirements": {
+                    "styles": {"value": ["Contemporary"]},
+                    "discipline_requirements": {"jazz": {"required_level": "high"}},
+                },
+            },
+            "match": {"overall": {}},
+        }
+        categories = opportunity_card(item)["categories"]
+        self.assertIn("contemporary", categories)
+        self.assertIn("jazz", categories)
 
 
 if __name__ == "__main__":

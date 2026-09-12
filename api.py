@@ -425,6 +425,57 @@ def get_my_access(user: CurrentUser) -> dict[str, Any]:
     return _access_for_user(user)
 
 
+def _require_premium_access(user: dict[str, Any]) -> None:
+    if _membership_tier(user) not in {"beta", "pro", "school"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This Premium profile insight is not included with Free access.",
+        )
+
+
+def _cv_insights(artist_dna: dict[str, Any]) -> list[dict[str, str]]:
+    """Turn evidence-backed profile gaps into a short Premium improvement plan."""
+    insights: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(area: str, message: str, action: str) -> None:
+        key = f"{area}:{message}".casefold()
+        if key not in seen and len(insights) < 6:
+            seen.add(key)
+            insights.append({"area": area, "message": message, "action": action})
+
+    intelligence = artist_dna.get("intelligence", {})
+    for missing in intelligence.get("missing_information", []) if isinstance(intelligence, dict) else []:
+        text = str(missing).strip()
+        if text:
+            add("CV evidence", text, "Add this to your performer profile if you can evidence it.")
+    physical = artist_dna.get("physical", {})
+    if not isinstance(physical, dict) or not physical.get("headshot_available"):
+        add("Headshot", "No professional headshot is available yet.", "Add a clear professional headshot.")
+    for question in _matching_profile_questions(artist_dna):
+        question_id = str(question.get("id", ""))
+        labels = {
+            "gender": ("Matching", "Your gender preference for gender-specific roles is not set."),
+            "work_rights": ("Eligibility", "Your work-rights information is not set."),
+            "availability": ("Availability", "Your availability for a new contract is not set."),
+            "relocation": ("Preferences", "Your relocation preference is not set."),
+        }
+        if question_id in labels:
+            area, message = labels[question_id]
+            add(area, message, "Complete this in your performer profile.")
+    return insights
+
+
+@app.get("/me/cv-insights")
+def get_cv_insights(user: CurrentUser, storage: Storage) -> dict[str, Any]:
+    """Premium-only, evidence-based prompts to make a performer profile stronger."""
+    _require_premium_access(user)
+    artist = storage.get_artist_for_user(user["id"])
+    if not artist:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload a CV to see profile insights.")
+    return {"items": _cv_insights(artist["dna"])}
+
+
 @app.put("/me/profile")
 def update_profile(payload: ProfileRequest, user: CurrentUser, storage: Storage) -> dict[str, Any]:
     saved_user = storage.update_user_profile(user["id"], payload.display_name, payload.profile)

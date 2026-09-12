@@ -7,6 +7,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -14,6 +15,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from opportunity_schema import OPPORTUNITY_SCHEMA
+
+
+_DIRECTORY_DOMAINS = frozenset({
+    "balletplaces.com", "danceeurope.net", "ballee.co", "entertainersworldwidejobs.com", "allcasting.com",
+})
 
 
 # ============================================================
@@ -80,6 +86,47 @@ def fetch_opportunity_page(url: str, timeout: int = 25) -> str:
         )
 
     return response.text
+
+
+def _is_directory_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    return host in _DIRECTORY_DOMAINS
+
+
+def extract_official_application_url(html: str, listing_url: str) -> str:
+    """Prefer an explicit off-directory application link embedded in a listing."""
+    if not _is_directory_url(listing_url):
+        return listing_url
+    candidates: list[tuple[int, str]] = []
+    for link in BeautifulSoup(html, "html.parser").find_all("a", href=True):
+        href = urljoin(listing_url, str(link["href"]).strip())
+        if not href.startswith(("https://", "http://")) or _is_directory_url(href):
+            continue
+        text = link.get_text(" ", strip=True).lower()
+        score = 0
+        if any(word in text for word in ("apply", "application", "audition", "vacancy", "career", "casting")):
+            score += 10
+        if any(word in href.lower() for word in ("apply", "application", "audition", "career", "jobs", "casting")):
+            score += 4
+        candidates.append((score, href))
+    if not candidates:
+        return ""
+    # Stable ordering makes repeated daily imports deterministic.
+    return sorted(candidates, key=lambda item: (-item[0], item[1]))[0][1]
+
+
+def _set_extracted_official_url(opportunity: dict[str, Any], official_url: str) -> None:
+    if not official_url:
+        return
+    for path in (("application", "application_url"), ("source", "official_url")):
+        target = opportunity
+        for key in path[:-1]:
+            target = target.setdefault(key, {})
+        field = target.get(path[-1])
+        if isinstance(field, dict):
+            field["value"] = official_url
+        else:
+            target[path[-1]] = {"value": official_url}
 
 
 # ============================================================
@@ -786,7 +833,8 @@ def analyse_opportunity(
 ) -> dict[str, Any]:
     """Fetch a listing, extract text, and return structured JSON."""
 
-    page_text = listing_text or extract_useful_text(fetch_opportunity_page(url))
+    page_html = "" if listing_text else fetch_opportunity_page(url)
+    page_text = listing_text or extract_useful_text(page_html)
 
     if not page_text:
         raise OpportunityFetchError(
@@ -835,9 +883,9 @@ def analyse_opportunity(
     )
 
     try:
-        return json.loads(
-            response.output_text
-        )
+        opportunity = json.loads(response.output_text)
+        _set_extracted_official_url(opportunity, extract_official_application_url(page_html, url))
+        return opportunity
 
     except json.JSONDecodeError as error:
         raise RuntimeError(
