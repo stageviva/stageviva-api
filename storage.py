@@ -83,6 +83,15 @@ class StageVivaStorage:
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, endpoint TEXT NOT NULL UNIQUE,
+                subscription_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS push_deliveries (
+                notification_id TEXT NOT NULL, subscription_id TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                PRIMARY KEY (notification_id, subscription_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_cv_upload_events_user
             ON cv_upload_events (user_id);
         """)
@@ -408,6 +417,59 @@ class StageVivaStorage:
         """, (_utc_now(), notification_id, user_id))
         self.connection.commit()
         return cursor.rowcount == 1
+
+    def upsert_push_subscription(self, user_id: str, subscription: dict[str, Any]) -> None:
+        endpoint = str(subscription.get("endpoint") or "")
+        if not endpoint:
+            raise ValueError("A push subscription needs an endpoint.")
+        subscription_id = _stable_id("push", endpoint)
+        now = _utc_now()
+        self.connection.execute("""
+            INSERT INTO push_subscriptions (id, user_id, endpoint, subscription_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,
+                subscription_json=excluded.subscription_json, updated_at=excluded.updated_at
+        """, (subscription_id, user_id, endpoint, json.dumps(subscription), now, now))
+        self.connection.commit()
+
+    def remove_push_subscription(self, user_id: str, endpoint: str) -> bool:
+        cursor = self.connection.execute(
+            "DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?", (user_id, endpoint),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def remove_push_subscription_by_id(self, subscription_id: str) -> bool:
+        cursor = self.connection.execute("DELETE FROM push_subscriptions WHERE id = ?", (subscription_id,))
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def pending_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute("""
+            SELECT notification_outbox.id AS notification_id, notification_outbox.match_json,
+                   opportunities.id AS opportunity_id, opportunities.title,
+                   push_subscriptions.id AS subscription_id, push_subscriptions.endpoint,
+                   push_subscriptions.subscription_json
+            FROM notification_outbox
+            JOIN users ON users.artist_id = notification_outbox.artist_id
+            JOIN opportunities ON opportunities.id = notification_outbox.opportunity_id
+            JOIN push_subscriptions ON push_subscriptions.user_id = users.id
+            LEFT JOIN push_deliveries ON push_deliveries.notification_id = notification_outbox.id
+                AND push_deliveries.subscription_id = push_subscriptions.id
+            WHERE users.in_app_notifications = 1
+              AND push_deliveries.notification_id IS NULL
+              AND notification_outbox.created_at >= push_subscriptions.created_at
+            ORDER BY notification_outbox.created_at ASC LIMIT ?
+        """, (limit,)).fetchall()
+        return [{**dict(row), "match": json.loads(row["match_json"]),
+                 "subscription": json.loads(row["subscription_json"])} for row in rows]
+
+    def mark_push_delivered(self, notification_id: str, subscription_id: str) -> None:
+        self.connection.execute("""
+            INSERT OR IGNORE INTO push_deliveries (notification_id, subscription_id, delivered_at)
+            VALUES (?, ?, ?)
+        """, (notification_id, subscription_id, _utc_now()))
+        self.connection.commit()
 
     def get_or_create_setting(self, key: str, factory: Callable[[], str]) -> str:
         row = self.connection.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()

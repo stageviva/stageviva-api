@@ -31,6 +31,7 @@ from match_service import match_artist_to_opportunity
 from opportunity_policy import is_stageviva_eligible
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_presentation import matches_for_filters, opportunity_detail
+from push_notifications import deliver_pending_push_notifications, public_vapid_key
 from source_registry import get_active_sources
 from storage import StageVivaStorage
 
@@ -68,6 +69,11 @@ class ProfileRequest(BaseModel):
 class NotificationPreferencesRequest(BaseModel):
     email_notifications: bool
     in_app_notifications: bool
+
+
+class PushSubscriptionRequest(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=4096)
+    keys: dict[str, str]
 
 
 class ArtistDNARequest(BaseModel):
@@ -509,6 +515,8 @@ def _run_daily_source_scan() -> None:
                 logger.info("Notification email delivery completed: %s", delivery)
             else:
                 logger.info("Notification emails are queued; Resend is not configured yet")
+            push_delivery = deliver_pending_push_notifications(storage)
+            logger.info("Push notification delivery completed: %s", push_delivery)
         finally:
             storage.close()
     except Exception:
@@ -751,3 +759,22 @@ def update_notification_preferences(
         user["id"], email=payload.email_notifications, in_app=payload.in_app_notifications,
     )
     return _public_user(updated)["notification_preferences"]
+
+
+@app.get("/me/push/public-key")
+def get_push_public_key(user: CurrentUser, storage: Storage) -> dict[str, str]:
+    """Give the installed app the public VAPID key needed to subscribe."""
+    return {"public_key": public_vapid_key(storage)}
+
+
+@app.post("/me/push-subscriptions", status_code=status.HTTP_204_NO_CONTENT)
+def save_push_subscription(payload: PushSubscriptionRequest, user: CurrentUser, storage: Storage) -> None:
+    if not payload.keys.get("p256dh") or not payload.keys.get("auth"):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="A browser push subscription needs p256dh and auth keys.")
+    storage.upsert_push_subscription(user["id"], payload.model_dump())
+
+
+@app.delete("/me/push-subscriptions", status_code=status.HTTP_204_NO_CONTENT)
+def remove_push_subscription(payload: PushSubscriptionRequest, user: CurrentUser, storage: Storage) -> None:
+    storage.remove_push_subscription(user["id"], payload.endpoint)

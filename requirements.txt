@@ -11,3 +11,4 @@ python-dotenv
 pypdf
 python-dateutil==2.9.0.post0
 requests
+pywebpush==2.0.3

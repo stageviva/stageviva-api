@@ -53,6 +53,21 @@ class ApiTest(unittest.TestCase):
         other_token = self.register("other@example.com", "Other Artist")
         self.assertEqual(self.client.get("/matches", headers={"Authorization": f"Bearer {other_token}"}).json(), [])
 
+    def test_user_can_register_a_private_phone_push_subscription(self) -> None:
+        token = self.register("push@example.com", "Push Artist")
+        headers = {"Authorization": f"Bearer {token}"}
+        public_key = self.client.get("/me/push/public-key", headers=headers)
+        self.assertEqual(public_key.status_code, 200, public_key.text)
+        self.assertGreater(len(public_key.json()["public_key"]), 80)
+        subscription = {
+            "endpoint": "https://push.example.test/subscription/123",
+            "keys": {"p256dh": "browser-public-key", "auth": "browser-auth-key"},
+        }
+        saved = self.client.post("/me/push-subscriptions", headers=headers, json=subscription)
+        self.assertEqual(saved.status_code, 204, saved.text)
+        removed = self.client.request("DELETE", "/me/push-subscriptions", headers=headers, json=subscription)
+        self.assertEqual(removed.status_code, 204, removed.text)
+
     def test_lovable_session_creates_and_reuses_one_stageviva_user(self) -> None:
         claims = {
             "sub": "lovable-user-123", "email": "lovable@example.com",
