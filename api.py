@@ -27,6 +27,7 @@ from pwdlib import PasswordHash
 
 from artist_intelligence import analyse_artist, enrich_artist_dna
 from catalogue_seed import seed_catalogue_if_empty
+from database_backups import create_database_backup, list_database_backups
 from match_service import match_artist_to_opportunity
 from opportunity_discovery import DiscoveredOpportunity
 from opportunity_policy import is_stageviva_eligible
@@ -577,6 +578,10 @@ def _run_daily_source_scan() -> None:
         from daily_pipeline import run_daily_pipeline
 
         limit = int(os.getenv("STAGEVIVA_DAILY_SOURCE_LIMIT", "5"))
+        backup = create_database_backup(
+            DATABASE_PATH, keep=max(1, int(os.getenv("STAGEVIVA_BACKUP_RETENTION_DAYS", "14"))),
+        )
+        logger.info("Daily database backup completed: %s", backup)
         storage = StageVivaStorage(DATABASE_PATH)
         try:
             result = run_daily_pipeline(storage, limit_per_source=max(1, limit))
@@ -816,6 +821,33 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
 def admin_list_opportunities(admin: AdminUser, storage: Storage) -> list[dict[str, Any]]:
     """Owner-only import and moderation queue, including hidden listings."""
     return storage.list_all_opportunities()
+
+
+@app.get("/admin/operations")
+def admin_operations(admin: AdminUser, storage: Storage) -> dict[str, Any]:
+    """Owner-only operational status for the daily import and rolling backups."""
+    recent_runs = storage.list_source_runs(limit=200)
+    latest_by_source: dict[str, dict[str, Any]] = {}
+    for run in recent_runs:
+        latest_by_source.setdefault(str(run["source_name"]), run)
+    source_health = []
+    for source in get_active_sources():
+        latest = latest_by_source.get(source.name)
+        result = latest.get("result", {}) if latest else {}
+        status_label = "not_run" if latest is None else "healthy"
+        if latest and latest["status"] == "failed":
+            status_label = "failed"
+        elif latest and int(result.get("discovered", 0) or 0) == 0:
+            status_label = "warning"
+        source_health.append({
+            "source": source.name,
+            "status": status_label,
+            "last_run_at": latest.get("completed_at") if latest else None,
+            "discovered": int(result.get("discovered", 0) or 0),
+            "new_opportunities": int(result.get("stored_opportunities", 0) or 0),
+            "error": latest.get("error") if latest else None,
+        })
+    return {"sources": source_health, "backups": list_database_backups(DATABASE_PATH)}
 
 
 @app.patch("/admin/opportunities/{opportunity_id}")
