@@ -73,6 +73,7 @@ class ApiTest(unittest.TestCase):
         token = self.register("owner@example.com", "StageViva Owner")
         headers = {"Authorization": f"Bearer {token}"}
         with patch.dict(api.os.environ, {"STAGEVIVA_ADMIN_EMAILS": "owner@example.com"}):
+            self.assertTrue(self.client.get("/me", headers=headers).json()["is_admin"])
             created = self.client.post("/admin/opportunities", headers=headers, json={
                 "title": "Example Ballet — company dancer contract",
                 "organisation": "Example Ballet",

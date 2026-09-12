@@ -129,6 +129,7 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "id": user["id"], "email": user["email"], "display_name": user["display_name"],
         "profile": user["profile"], "artist_id": user["artist_id"],
         "membership_tier": _membership_tier(user),
+        "is_admin": _is_admin_email(user["email"]),
         "notification_preferences": {
             "email_notifications": user["email_notifications"],
             "in_app_notifications": user["in_app_notifications"],
@@ -275,14 +276,19 @@ def current_user(
 CurrentUser = Annotated[dict[str, Any], Depends(current_user)]
 
 
-def require_admin(user: CurrentUser) -> dict[str, Any]:
-    """Restrict moderation to the owner emails configured in Render."""
+def _is_admin_email(email: str) -> bool:
+    """Check the owner allow-list configured in Render without exposing it."""
     allowed = {
         email.strip().casefold()
         for email in os.getenv("STAGEVIVA_ADMIN_EMAILS", "").split(",")
         if email.strip()
     }
-    if user["email"].casefold() not in allowed:
+    return email.casefold() in allowed
+
+
+def require_admin(user: CurrentUser) -> dict[str, Any]:
+    """Restrict moderation to the owner emails configured in Render."""
+    if not _is_admin_email(user["email"]):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required.")
     return user
 
