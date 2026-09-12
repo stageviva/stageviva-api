@@ -292,6 +292,11 @@ ARTIST_SCHEMA = _object({
 
         "age": STRING,
 
+        # This is deliberately performer-confirmed where it is not explicitly
+        # stated in the CV.  It must never be inferred from a name, photo or
+        # role history.
+        "gender": STRING,
+
         "nationality": STRING,
 
         "location": STRING,

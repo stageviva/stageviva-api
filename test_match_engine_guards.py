@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from match_engine import _apply_requirement_guards, _calibrate_evidence_score
+from match_engine import _apply_gender_requirement_guard, _apply_requirement_guards, _calibrate_evidence_score
 
 
 class MatchRequirementGuardsTest(unittest.TestCase):
@@ -57,6 +57,21 @@ class MatchRequirementGuardsTest(unittest.TestCase):
             "gaps": [{}],
         }
         self.assertEqual(_calibrate_evidence_score(result)["overall"]["match_score"], 90)
+
+    def test_explicit_gender_conflict_is_capped_at_twenty_percent(self) -> None:
+        artist = {"identity": {"gender": "female"}}
+        opportunity = {"requirements": {"physical": {"gender_requirement": {"value": "Male dancer required"}}}}
+        result = {"overall": {"match_score": 87}, "gaps": [], "physical_match": {}}
+        guarded = _apply_gender_requirement_guard(artist, opportunity, result)
+        self.assertEqual(guarded["overall"]["match_score"], 20)
+        self.assertEqual(guarded["overall"]["recommendation"], "not_recommended")
+        self.assertEqual(guarded["physical_match"]["gender"]["status"], "ineligible")
+
+    def test_mixed_gender_listing_does_not_penalise_anyone(self) -> None:
+        artist = {"identity": {"gender": "female"}}
+        opportunity = {"requirements": {"physical": {"gender_requirement": {"value": "Male & Female acrobatic duos"}}}}
+        result = {"overall": {"match_score": 87}, "gaps": []}
+        self.assertEqual(_apply_gender_requirement_guard(artist, opportunity, result)["overall"]["match_score"], 87)
 
 
 if __name__ == "__main__":

@@ -214,6 +214,10 @@ Do not use general knowledge to invent:
 
 Everything must be supported by the CV.
 
+Gender must never be inferred from a name, photograph, pronouns, roles or
+assumptions. Record it only if the CV explicitly states it; otherwise use
+"unknown". The performer can confirm it later in their profile.
+
 ============================================================
 3. DISCIPLINE ANALYSIS
 ============================================================

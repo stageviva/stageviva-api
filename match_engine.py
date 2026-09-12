@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from typing import Any, Optional
 
 from dotenv import load_dotenv
@@ -581,6 +582,77 @@ _CORE_CROSS_DISCIPLINES = frozenset({
 })
 
 
+def _normalise_artist_gender(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    aliases = {
+        "male": "male", "man": "male", "men": "male", "m": "male",
+        "female": "female", "woman": "female", "women": "female", "f": "female",
+        "non-binary": "non_binary", "nonbinary": "non_binary", "non binary": "non_binary",
+    }
+    return aliases.get(raw, "unknown")
+
+
+def _required_genders(opportunity: dict[str, Any]) -> set[str]:
+    """Return a restricted gender set only when a listing is unambiguous.
+
+    Listings for "all genders", "male and female", or mixed-gender duos must
+    remain open to every performer. A single-gender requirement, however, is
+    a hard eligibility constraint rather than a soft AI preference.
+    """
+    physical = opportunity.get("requirements", {}).get("physical", {})
+    field = physical.get("gender_requirement", {}) if isinstance(physical, dict) else {}
+    raw = field.get("value", field) if isinstance(field, dict) else field
+    text = str(raw or "").strip().lower()
+    if not text or text in {"unknown", "not specified", "n/a"}:
+        return set()
+    if any(phrase in text for phrase in (
+        "all gender", "any gender", "both gender", "male and female", "female and male",
+        "men and women", "women and men", "mixed gender", "mixed-gender",
+    )):
+        return set()
+    genders: set[str] = set()
+    if re.search(r"\b(?:male|men|man)\b", text):
+        genders.add("male")
+    if re.search(r"\b(?:female|women|woman)\b", text):
+        genders.add("female")
+    if re.search(r"\b(?:non[ -]?binary)\b", text):
+        genders.add("non_binary")
+    # More than one identified gender is not a single-gender exclusion.
+    return genders if len(genders) == 1 else set()
+
+
+def _apply_gender_requirement_guard(
+    artist_dna: dict[str, Any], opportunity: dict[str, Any], result: dict[str, Any],
+) -> dict[str, Any]:
+    """Cap explicit gender conflicts so unsuitable roles are still visible but clear."""
+    required = _required_genders(opportunity)
+    artist_gender = _normalise_artist_gender(artist_dna.get("identity", {}).get("gender"))
+    if not required or artist_gender == "unknown" or artist_gender in required:
+        return result
+
+    required_label = next(iter(required)).replace("_", " ")
+    overall = result.setdefault("overall", {})
+    overall["match_score"] = min(int(overall.get("match_score", 0) or 0), 20)
+    overall["match_level"] = "very_weak"
+    overall["recommendation"] = "not_recommended"
+    overall["summary"] = f"This role is explicitly seeking a {required_label} performer."
+    physical_match = result.setdefault("physical_match", {})
+    physical_match["gender"] = {
+        "status": "ineligible",
+        "evidence": [f"The opportunity explicitly requires a {required_label} performer."],
+    }
+    gap_text = f"This opportunity is explicitly seeking a {required_label} performer, which does not match your profile setting."
+    gaps = result.setdefault("gaps", [])
+    if not any(gap_text == item.get("description") for item in gaps if isinstance(item, dict)):
+        gaps.append({
+            "factor": "Gender requirement",
+            "description": gap_text,
+            "evidence": [],
+            "severity": "major",
+        })
+    return result
+
+
 def _calibrate_evidence_score(result: dict[str, Any]) -> dict[str, Any]:
     """Resolve coarse model score ties using the structured evidence it gave.
 
@@ -741,11 +813,8 @@ def match_artist_to_opportunity(
 
     try:
         calibrated = _calibrate_evidence_score(json.loads(response.output_text))
-        return _apply_requirement_guards(
-            artist_dna,
-            opportunity,
-            calibrated,
-        )
+        guarded = _apply_requirement_guards(artist_dna, opportunity, calibrated)
+        return _apply_gender_requirement_guard(artist_dna, opportunity, guarded)
 
     except json.JSONDecodeError as error:
         raise MatchEngineError(

@@ -171,6 +171,18 @@ class ApiTest(unittest.TestCase):
         questions = self.client.get("/me/profile-questions", headers=headers).json()["questions"]
         self.assertNotIn("contract_preferences", [question["id"] for question in questions])
 
+    def test_gender_answer_is_saved_in_artist_dna(self) -> None:
+        token = self.register("gender@example.com", "Gender Artist")
+        headers = {"Authorization": f"Bearer {token}"}
+        self.client.put("/me/artist-dna", headers=headers, json={
+            "artist_dna": {"identity": {"name": "Gender Artist", "gender": "unknown"}},
+        })
+        response = self.client.post("/me/artist-dna/answers", headers=headers, json={
+            "answers": [{"id": "gender", "answer": "Female"}],
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["artist_dna"]["identity"]["gender"], "female")
+
     def test_matching_profile_questions_are_short_and_structured(self) -> None:
         token = self.register("questions@example.com", "Question Artist")
         headers = {"Authorization": f"Bearer {token}"}

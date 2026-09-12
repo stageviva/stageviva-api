@@ -411,7 +411,20 @@ def get_my_access(user: CurrentUser) -> dict[str, Any]:
 
 @app.put("/me/profile")
 def update_profile(payload: ProfileRequest, user: CurrentUser, storage: Storage) -> dict[str, Any]:
-    return _public_user(storage.update_user_profile(user["id"], payload.display_name, payload.profile))
+    saved_user = storage.update_user_profile(user["id"], payload.display_name, payload.profile)
+    # Keep a performer-confirmed gender from the compact profile editor in
+    # their matching DNA too. This supports both the current basic editor and
+    # the full Artist DNA editor without asking the performer twice.
+    gender = _normalise_gender(
+        payload.profile.get("gender", payload.profile.get("gender_identity"))
+    )
+    artist = storage.get_artist_for_user(user["id"])
+    if artist and gender != "unknown":
+        existing = _normalise_gender(artist["dna"].get("identity", {}).get("gender"))
+        if gender != existing:
+            updated_dna = _deep_merge(artist["dna"], {"identity": {"gender": gender}})
+            _store_and_match_artist(user["id"], updated_dna, storage)
+    return _public_user(saved_user)
 
 
 @app.get("/me/artist-dna")
@@ -452,6 +465,19 @@ def _synchronise_date_of_birth(identity: dict[str, Any]) -> None:
         identity["age"] = calculated_age
 
 
+_GENDER_ALIASES = {
+    "male": "male", "man": "male", "men": "male", "m": "male",
+    "female": "female", "woman": "female", "women": "female", "f": "female",
+    "non-binary": "non_binary", "nonbinary": "non_binary", "non binary": "non_binary",
+    "prefer not to say": "unknown", "unknown": "unknown", "": "unknown",
+}
+
+
+def _normalise_gender(value: Any) -> str:
+    """Normalise a performer-confirmed gender without making assumptions."""
+    return _GENDER_ALIASES.get(str(value or "").strip().lower(), "unknown")
+
+
 def _matching_profile_questions(artist_dna: dict[str, Any]) -> list[dict[str, Any]]:
     """Return only short, actionable questions that influence matching."""
     identity = artist_dna.get("identity", {})
@@ -460,6 +486,11 @@ def _matching_profile_questions(artist_dna: dict[str, Any]) -> list[dict[str, An
     questions: list[dict[str, Any]] = []
     if _is_missing(identity.get("date_of_birth")):
         questions.append({"id": "date_of_birth", "question": "What is your date of birth?", "type": "date"})
+    if _is_missing(identity.get("gender")):
+        questions.append({
+            "id": "gender", "question": "Which gender should we use when matching gender-specific roles?",
+            "type": "single_select", "options": ["Male", "Female", "Non-binary", "Prefer not to say"],
+        })
     if _is_missing(identity.get("nationality")):
         questions.append({"id": "nationality", "question": "What is your nationality?", "type": "text"})
     if _is_missing(identity.get("location")):
@@ -655,6 +686,8 @@ def _apply_profile_answers_locally(
             continue
         if question in {"nationality", "what is your nationality?"}:
             identity["nationality"] = value
+        elif question in {"gender", "which gender should we use when matching gender-specific roles?"}:
+            identity["gender"] = _normalise_gender(value)
         elif question in {"date_of_birth", "date of birth", "what is your date of birth?"}:
             age = _age_from_date_of_birth(value)
             if age is None:
@@ -702,8 +735,9 @@ def answer_artist_questions(
     try:
         updated_dna, locally_applied = _apply_profile_answers_locally(artist["dna"], payload.answers)
         if locally_applied:
-            storage.upsert_artist_for_user(user["id"], updated_dna)
-            outcome = {"matched_opportunities": 0, "queued_notifications": 0}
+            # These answers include availability, contract preferences and
+            # gender, all of which can change which opportunities are suitable.
+            outcome = _store_and_match_artist(user["id"], updated_dna, storage)
         else:
             updated_dna = enrich_artist_dna(artist["dna"], payload.answers)
             outcome = _store_and_match_artist(user["id"], updated_dna, storage)
