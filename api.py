@@ -28,6 +28,7 @@ from pwdlib import PasswordHash
 from artist_intelligence import analyse_artist, enrich_artist_dna
 from catalogue_seed import seed_catalogue_if_empty
 from match_service import match_artist_to_opportunity
+from opportunity_discovery import DiscoveredOpportunity
 from opportunity_policy import is_stageviva_eligible
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_presentation import matches_for_filters, opportunity_detail
@@ -74,6 +75,22 @@ class NotificationPreferencesRequest(BaseModel):
 class PushSubscriptionRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=4096)
     keys: dict[str, str]
+
+
+class AdminOpportunityUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    visible: bool | None = None
+
+
+class AdminManualOpportunityRequest(BaseModel):
+    title: str = Field(min_length=3, max_length=300)
+    organisation: str = Field(min_length=1, max_length=240)
+    role_summary: str = Field(min_length=1, max_length=500)
+    location: str = Field(min_length=1, max_length=240)
+    deadline: str = Field(min_length=1, max_length=120)
+    official_url: str = Field(min_length=8, max_length=2048)
+    contract_type: str = Field(min_length=1, max_length=240)
+    description: str = Field(default="", max_length=3000)
 
 
 class ArtistDNARequest(BaseModel):
@@ -256,6 +273,21 @@ def current_user(
 
 
 CurrentUser = Annotated[dict[str, Any], Depends(current_user)]
+
+
+def require_admin(user: CurrentUser) -> dict[str, Any]:
+    """Restrict moderation to the owner emails configured in Render."""
+    allowed = {
+        email.strip().casefold()
+        for email in os.getenv("STAGEVIVA_ADMIN_EMAILS", "").split(",")
+        if email.strip()
+    }
+    if user["email"].casefold() not in allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required.")
+    return user
+
+
+AdminUser = Annotated[dict[str, Any], Depends(require_admin)]
 
 
 @asynccontextmanager
@@ -737,6 +769,64 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
                 and is_current_opportunity(item["opportunity"])):
             return opportunity_detail(item)
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
+
+
+@app.get("/admin/opportunities")
+def admin_list_opportunities(admin: AdminUser, storage: Storage) -> list[dict[str, Any]]:
+    """Owner-only import and moderation queue, including hidden listings."""
+    return storage.list_all_opportunities()
+
+
+@app.patch("/admin/opportunities/{opportunity_id}")
+def admin_update_opportunity(
+    opportunity_id: str, payload: AdminOpportunityUpdateRequest, admin: AdminUser, storage: Storage,
+) -> dict[str, bool]:
+    changed = False
+    if payload.title is not None:
+        changed = storage.update_opportunity_title(opportunity_id, payload.title.strip()) or changed
+    if payload.visible is not None:
+        changed = storage.set_opportunity_visibility(opportunity_id, payload.visible) or changed
+    if not changed and not any(item["id"] == opportunity_id for item in storage.list_all_opportunities()):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
+    return {"ok": True}
+
+
+@app.post("/admin/opportunities", status_code=status.HTTP_201_CREATED)
+def admin_add_opportunity(
+    payload: AdminManualOpportunityRequest, admin: AdminUser, storage: Storage,
+) -> dict[str, Any]:
+    if not payload.official_url.startswith(("https://", "http://")):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Use the official http(s) listing URL.")
+    opportunity = {
+        "identity": {
+            "title": {"value": payload.title.strip()},
+            "organisation": {"value": payload.organisation.strip()},
+            "opportunity_type": {"value": payload.role_summary.strip()},
+            "description": {"value": payload.description.strip()},
+        },
+        "location": {"city": {"value": payload.location.strip()}, "country": {"value": "unknown"}},
+        "dates": {"application_deadline": {"value": payload.deadline.strip()}, "audition_dates": {"value": []}},
+        "contract_and_compensation": {"contract_type": {"value": payload.contract_type.strip()}},
+        "application": {"application_url": {"value": payload.official_url.strip()}},
+        "source": {"official_url": {"value": payload.official_url.strip()}},
+    }
+    if not is_stageviva_eligible(opportunity) or not is_current_opportunity(opportunity):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="This listing is not a current paid or qualifying transition opportunity.")
+    item = DiscoveredOpportunity(
+        payload.title.strip(), payload.official_url.strip(), "StageViva manual review",
+        payload.official_url.strip(), "manual", description=payload.description.strip(),
+    )
+    opportunity_id = storage.upsert_opportunity(item, opportunity)
+    matched = queued = 0
+    for artist_id, artist_dna in storage.list_registered_artists():
+        result = match_artist_to_opportunity(artist_dna, opportunity)
+        storage.upsert_match(artist_id, opportunity_id, result)
+        matched += 1
+        if result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
+            queued += int(storage.queue_notification(artist_id, opportunity_id, result))
+    return {"id": opportunity_id, "matched_artists": matched, "queued_notifications": queued}
 
 
 @app.get("/notifications")

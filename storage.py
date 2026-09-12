@@ -152,6 +152,41 @@ class StageVivaStorage:
         )
         self.connection.commit()
 
+    def set_opportunity_visibility(self, opportunity_id: str, visible: bool) -> bool:
+        cursor = self.connection.execute("""
+            UPDATE opportunities SET visible = ?, updated_at = ? WHERE id = ?
+        """, (int(visible), _utc_now(), opportunity_id))
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def update_opportunity_title(self, opportunity_id: str, title: str) -> bool:
+        row = self.connection.execute(
+            "SELECT opportunity_json FROM opportunities WHERE id = ?", (opportunity_id,),
+        ).fetchone()
+        if not row:
+            return False
+        opportunity = json.loads(row["opportunity_json"])
+        identity = opportunity.setdefault("identity", {})
+        title_field = identity.get("title")
+        if isinstance(title_field, dict):
+            title_field["value"] = title
+        else:
+            identity["title"] = {"value": title}
+        self.connection.execute("""
+            UPDATE opportunities SET title = ?, opportunity_json = ?, updated_at = ? WHERE id = ?
+        """, (title, json.dumps(opportunity, ensure_ascii=False), _utc_now(), opportunity_id))
+        self.connection.commit()
+        return True
+
+    def list_all_opportunities(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute("""
+            SELECT id, listing_url, title, source_name, source_url, category, visible,
+                   opportunity_json, created_at, updated_at
+            FROM opportunities ORDER BY updated_at DESC
+        """).fetchall()
+        return [{**dict(row), "visible": bool(row["visible"]),
+                 "opportunity": json.loads(row["opportunity_json"])} for row in rows]
+
     def upsert_artist(self, artist: dict[str, Any]) -> str:
         name = str(artist.get("identity", {}).get("name") or "unknown artist")
         artist_id = _stable_id("artist", name.lower())

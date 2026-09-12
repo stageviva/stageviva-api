@@ -69,6 +69,33 @@ class ApiTest(unittest.TestCase):
         removed = self.client.request("DELETE", "/me/push-subscriptions", headers=headers, json=subscription)
         self.assertEqual(removed.status_code, 204, removed.text)
 
+    def test_owner_can_moderate_and_add_manual_opportunities(self) -> None:
+        token = self.register("owner@example.com", "StageViva Owner")
+        headers = {"Authorization": f"Bearer {token}"}
+        with patch.dict(api.os.environ, {"STAGEVIVA_ADMIN_EMAILS": "owner@example.com"}):
+            created = self.client.post("/admin/opportunities", headers=headers, json={
+                "title": "Example Ballet — company dancer contract",
+                "organisation": "Example Ballet",
+                "role_summary": "Company dancer audition",
+                "location": "London, United Kingdom",
+                "deadline": "31 December 2099",
+                "official_url": "https://example.org/audition",
+                "contract_type": "Paid company contract",
+                "description": "Paid professional employment for dancers.",
+            })
+            self.assertEqual(created.status_code, 201, created.text)
+            opportunity_id = created.json()["id"]
+            listings = self.client.get("/admin/opportunities", headers=headers)
+            self.assertEqual(listings.status_code, 200, listings.text)
+            self.assertEqual(listings.json()[0]["title"], "Example Ballet — company dancer contract")
+            updated = self.client.patch(f"/admin/opportunities/{opportunity_id}", headers=headers, json={
+                "title": "Example Ballet — paid company contract", "visible": False,
+            })
+            self.assertEqual(updated.status_code, 200, updated.text)
+            listing = self.client.get("/admin/opportunities", headers=headers).json()[0]
+            self.assertEqual(listing["title"], "Example Ballet — paid company contract")
+            self.assertFalse(listing["visible"])
+
     def test_lovable_session_creates_and_reuses_one_stageviva_user(self) -> None:
         claims = {
             "sub": "lovable-user-123", "email": "lovable@example.com",
