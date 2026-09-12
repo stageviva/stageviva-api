@@ -12,7 +12,12 @@ from stageviva_pipeline import run_pipeline
 from storage import StageVivaStorage
 
 ARTIST = {"identity": {"name": "Pipeline Test Dancer"}, "disciplines": []}
-OPPORTUNITY = {"identity": {"title": {"value": "Test audition"}}}
+OPPORTUNITY = {
+    "identity": {
+        "title": {"value": "Test company dancer audition"},
+        "opportunity_type": {"value": "Paid company contract"},
+    },
+}
 MATCH = {"overall": {"match_score": 75, "match_level": "strong", "recommendation": "good_match", "summary": "Test result", "confidence": "high"}}
 
 

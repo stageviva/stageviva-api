@@ -37,6 +37,18 @@ class OpportunityPresentationTest(unittest.TestCase):
         }
         self.assertEqual(opportunity_detail(item)["application"]["url"], "https://example.org/audition")
 
+    def test_representation_listings_are_an_agency_category(self) -> None:
+        item = {
+            "opportunity": {"identity": {
+                "organisation": {"value": "Example Talent Agency"},
+                "title": {"value": "Seeking dance representation"},
+                "description": {"value": "Agency representation for professional dancers."},
+                "opportunity_type": {"value": "Representation"},
+            }},
+            "match": {"overall": {}},
+        }
+        self.assertIn("agency", opportunity_card(item)["categories"])
+
 
 if __name__ == "__main__":
     unittest.main()

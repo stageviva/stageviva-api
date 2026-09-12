@@ -17,12 +17,7 @@ def _value(opportunity: dict[str, Any], *path: str) -> str:
 
 
 def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
-    """Keep career opportunities; exclude general education and training enrolment.
-
-    A trainee, apprentice or young-artist position remains eligible because it is
-    a transition into professional work. A school, class, diploma or intensive
-    does not belong in the shared audition-matching feed.
-    """
+    """Allow paid work and genuine transition roles, never general study."""
     text = " ".join((
         _value(opportunity, "identity", "title"),
         _value(opportunity, "identity", "opportunity_type"),
@@ -36,8 +31,8 @@ def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
     # the performer opportunity feed.
     transition_markers = (
         "apprentice", "apprenticeship", "trainee", "young artist", "young-artist",
-        "pre-professional company", "graduate company", "paid graduate programme",
-        "paid graduate program",
+        "pre-professional", "pre professional", "graduate company",
+        "paid graduate programme", "paid graduate program",
     )
     career_markers = (
         "paid", "employment", "contract", "company position", "company dancer",
@@ -45,21 +40,23 @@ def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
         *transition_markers,
     )
     education_markers = (
-        "school", "summer intensive", "summer school", "weekend class", "classes",
+        "school", "academy", "academies", "summer intensive", "summer school", "weekend class", "classes",
         "course", "diploma", "degree", "curriculum", "associate programme",
         "associate program", "pre-vocational", "tuition", "training programme",
-        "training program", "teacher training", "admission",
+        "training program", "teacher training", "admission", "conservatoire",
+        "conservatory", "masterclass", "workshop", "open class",
     )
     is_training = any(marker in text for marker in education_markers)
     if is_training:
-        # "Trainee" alone is often school language. Retain only an explicit
-        # paid/apprenticeship/young-artist professional pathway.
+        # A study provider sometimes calls an ordinary course a "trainee"
+        # programme. Retain only explicit career-transition wording.
         professional_pathway_markers = (
             "paid", "employment", "apprenticeship", "young artist", "young-artist",
-            "pre-professional company", "graduate company", "company contract",
+            "pre-professional company", "pre professional company", "graduate company", "company contract",
         )
         if not any(marker in text for marker in professional_pathway_markers):
             return False
-    if any(marker in text for marker in career_markers):
-        return True
-    return not is_training
+    # Unknown listings no longer pass by default. StageViva is a career feed,
+    # so each listing must identify paid/professional work or a qualifying
+    # trainee, apprenticeship or pre-professional pathway.
+    return any(marker in text for marker in career_markers)

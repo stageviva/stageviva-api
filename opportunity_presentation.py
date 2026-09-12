@@ -56,6 +56,7 @@ def opportunity_categories(opportunity: dict[str, Any]) -> list[str]:
         "modelling": ("model", "modelling", "modeling"),
         "commercial": ("commercial", "advert", "campaign"),
         "circus_acro": ("acrobat", "aerial", "circus"),
+        "agency": ("agency", "agent", "representation", "talent management"),
     }
     for category, markers in rules.items():
         if any(marker in text for marker in markers):

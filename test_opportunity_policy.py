@@ -24,6 +24,16 @@ class OpportunityPolicyTest(unittest.TestCase):
             opportunity_type="Pre-vocational classical ballet training programme",
             description="Weekend classes and tuition for school-age dancers.",
         )))
+        self.assertFalse(is_stageviva_eligible(opportunity(
+            opportunity_type="Academy audition",
+            description="Join our dance academy for the 2026 programme.",
+        )))
+
+    def test_excludes_an_unqualified_audition(self) -> None:
+        self.assertFalse(is_stageviva_eligible(opportunity(
+            opportunity_type="Audition",
+            description="An opportunity for performers.",
+        )))
 
     def test_keeps_paid_work_and_transition_roles(self) -> None:
         self.assertTrue(is_stageviva_eligible(opportunity(

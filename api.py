@@ -29,6 +29,7 @@ from artist_intelligence import analyse_artist, enrich_artist_dna
 from catalogue_seed import seed_catalogue_if_empty
 from match_service import match_artist_to_opportunity
 from opportunity_policy import is_stageviva_eligible
+from opportunity_lifecycle import is_current_opportunity
 from opportunity_presentation import matches_for_filters, opportunity_detail
 from source_registry import get_active_sources
 from storage import StageVivaStorage
@@ -501,6 +502,13 @@ def _run_daily_source_scan() -> None:
         try:
             result = run_daily_pipeline(storage, limit_per_source=max(1, limit))
             logger.info("Daily source scan completed: %s", result)
+            if os.getenv("RESEND_API_KEY") and os.getenv("RESEND_FROM_EMAIL"):
+                from email_notifications import deliver_pending_emails
+
+                delivery = deliver_pending_emails(storage)
+                logger.info("Notification email delivery completed: %s", delivery)
+            else:
+                logger.info("Notification emails are queued; Resend is not configured yet")
         finally:
             storage.close()
     except Exception:
@@ -695,7 +703,7 @@ def list_matches(
     }
     matches = [
         item for item in storage.list_matches_for_user(user["id"])
-        if is_stageviva_eligible(item["opportunity"])
+        if is_stageviva_eligible(item["opportunity"]) and is_current_opportunity(item["opportunity"])
     ]
     return matches_for_filters(
         matches, track=track, categories=selected_categories,
@@ -708,7 +716,7 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
     # app may use it while the main match feed is loading.
     matches = [
         item for item in storage.list_matches_for_user(user["id"])
-        if is_stageviva_eligible(item["opportunity"])
+        if is_stageviva_eligible(item["opportunity"]) and is_current_opportunity(item["opportunity"])
     ]
     return matches_for_filters(matches, track=None, categories=set())
 
@@ -717,7 +725,8 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
 def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) -> dict[str, Any]:
     """Return a clean detail screen for one recommendation."""
     for item in storage.list_matches_for_user(user["id"]):
-        if item["opportunity_id"] == opportunity_id and is_stageviva_eligible(item["opportunity"]):
+        if (item["opportunity_id"] == opportunity_id and is_stageviva_eligible(item["opportunity"])
+                and is_current_opportunity(item["opportunity"])):
             return opportunity_detail(item)
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
 

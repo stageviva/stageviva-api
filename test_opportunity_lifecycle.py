@@ -14,6 +14,12 @@ class OpportunityLifecycleTest(unittest.TestCase):
         self.assertTrue(is_current_opportunity(future, today=date(2026, 9, 3)))
         self.assertTrue(is_current_opportunity({}, today=date(2026, 9, 3)))
 
+    def test_rejects_a_past_season_named_only_in_the_listing(self) -> None:
+        expired = {"identity": {"title": {"value": "Dancers for the 2025/26 season"}}}
+        future = {"identity": {"title": {"value": "Dancers for the 2026/27 season"}}}
+        self.assertFalse(is_current_opportunity(expired, today=date(2026, 9, 12)))
+        self.assertTrue(is_current_opportunity(future, today=date(2026, 9, 12)))
+
 
 if __name__ == "__main__":
     unittest.main()

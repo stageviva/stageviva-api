@@ -113,13 +113,13 @@ def run_pipeline(
                 if analyse is None
                 else analyse(item.listing_url, _discovery_context(item))
             )
-            if not is_stageviva_eligible(opportunity):
-                storage.reject_listing(item.listing_url, item.source_name, "education_or_training")
-                skipped_ineligible += 1
-                continue
             if not is_current_opportunity(opportunity):
                 storage.reject_listing(item.listing_url, item.source_name, "expired")
                 skipped_expired += 1
+                continue
+            if not is_stageviva_eligible(opportunity):
+                storage.reject_listing(item.listing_url, item.source_name, "education_or_training")
+                skipped_ineligible += 1
                 continue
             opportunity_id = storage.upsert_opportunity(item, opportunity)
             analysed += 1
