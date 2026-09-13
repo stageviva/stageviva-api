@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from opportunity_policy import is_stageviva_eligible
+from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
 
 
 def opportunity(*, opportunity_type: str, description: str = "", contract: str = "") -> dict:
@@ -57,3 +57,19 @@ class OpportunityPolicyTest(unittest.TestCase):
         self.assertTrue(is_stageviva_eligible(opportunity(
             opportunity_type="Professional dancer representation", description="Open submission for our talent agency.",
         )))
+
+    def test_requires_an_official_destination_for_directory_listings(self) -> None:
+        item = opportunity(opportunity_type="Company dancer audition", description="Paid employment contract.")
+        self.assertFalse(has_verified_official_application_url(
+            item, "https://balletplaces.com/auditions/example",
+        ))
+        item["application"] = {"application_url": {"value": "https://company.example/careers"}}
+        self.assertTrue(has_verified_official_application_url(
+            item, "https://balletplaces.com/auditions/example",
+        ))
+
+    def test_accepts_a_direct_company_listing_as_the_official_destination(self) -> None:
+        item = opportunity(opportunity_type="Company dancer audition", description="Paid employment contract.")
+        self.assertTrue(has_verified_official_application_url(
+            item, "https://company.example/careers/audition",
+        ))

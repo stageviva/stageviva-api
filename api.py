@@ -32,7 +32,7 @@ from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
 from match_service import match_artist_to_opportunity
 from opportunity_discovery import DiscoveredOpportunity
-from opportunity_policy import is_stageviva_eligible
+from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_presentation import matches_for_filters, opportunity_detail
 from push_notifications import deliver_pending_push_notifications, public_vapid_key, send_test_push_notification
@@ -949,7 +949,7 @@ def trigger_daily_source_scan(
 def list_matches(
     user: CurrentUser,
     storage: Storage,
-    track: str | None = Query(default=None, pattern="^(contract|apprenticeship)$"),
+    track: str | None = Query(default=None, pattern="^(contract|apprenticeship|agency)$"),
     categories: str | None = None,
 ) -> list[dict[str, Any]]:
     selected_categories = {
@@ -957,7 +957,9 @@ def list_matches(
     }
     matches = [
         item for item in storage.list_matches_for_user(user["id"])
-        if is_stageviva_eligible(item["opportunity"]) and is_current_opportunity(item["opportunity"])
+        if (is_stageviva_eligible(item["opportunity"])
+            and is_current_opportunity(item["opportunity"])
+            and has_verified_official_application_url(item["opportunity"], item["listing_url"]))
     ]
     return matches_for_filters(
         matches, track=track, categories=selected_categories,
@@ -970,7 +972,9 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
     # app may use it while the main match feed is loading.
     matches = [
         item for item in storage.list_matches_for_user(user["id"])
-        if is_stageviva_eligible(item["opportunity"]) and is_current_opportunity(item["opportunity"])
+        if (is_stageviva_eligible(item["opportunity"])
+            and is_current_opportunity(item["opportunity"])
+            and has_verified_official_application_url(item["opportunity"], item["listing_url"]))
     ]
     return matches_for_filters(matches, track=None, categories=set())
 
@@ -980,7 +984,8 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
     """Return a clean detail screen for one recommendation."""
     for item in storage.list_matches_for_user(user["id"]):
         if (item["opportunity_id"] == opportunity_id and is_stageviva_eligible(item["opportunity"])
-                and is_current_opportunity(item["opportunity"])):
+                and is_current_opportunity(item["opportunity"])
+                and has_verified_official_application_url(item["opportunity"], item["listing_url"])):
             return opportunity_detail(item)
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
 

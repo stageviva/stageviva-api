@@ -96,6 +96,8 @@ def opportunity_track(opportunity: dict[str, Any]) -> str:
         field_value(opportunity, "identity", "description"),
         field_value(opportunity, "contract_and_compensation", "contract_type"),
     )).lower()
+    if any(marker in text for marker in ("agency", "agent", "representation", "talent management")):
+        return "agency"
     if any(marker in text for marker in ("apprentice", "apprenticeship", "trainee", "young artist", "young-artist", "pre-professional")):
         return "apprenticeship"
     return "contract"

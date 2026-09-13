@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
+
+
+DIRECTORY_DOMAINS = frozenset({
+    "balletplaces.com", "danceeurope.net", "ballee.co",
+    "entertainersworldwidejobs.com", "allcasting.com",
+})
 
 
 def _value(opportunity: dict[str, Any], *path: str) -> str:
@@ -14,6 +21,28 @@ def _value(opportunity: dict[str, Any], *path: str) -> str:
     if isinstance(current, dict):
         current = current.get("value", "")
     return str(current or "")
+
+
+def _is_verified_public_url(url: str) -> bool:
+    """A directory page is discovery evidence, never the final apply link."""
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    return parsed.scheme in {"http", "https"} and bool(host) and host not in DIRECTORY_DOMAINS
+
+
+def has_verified_official_application_url(opportunity: dict[str, Any], listing_url: str) -> bool:
+    """Return whether performers have a real company/casting/agency destination.
+
+    New listings may arrive through a directory, but they are only live once
+    the discovery step finds an off-directory official destination. Direct
+    company, casting and agency listings are themselves valid destinations.
+    """
+    candidates = (
+        _value(opportunity, "application", "application_url"),
+        _value(opportunity, "source", "official_url"),
+        listing_url,
+    )
+    return any(_is_verified_public_url(candidate) for candidate in candidates)
 
 
 def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:

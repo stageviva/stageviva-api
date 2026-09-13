@@ -24,7 +24,7 @@ from opportunity_discovery import (
 )
 from opportunity_intelligence import DiscoveryContext, analyse_opportunity
 from opportunity_lifecycle import is_current_opportunity
-from opportunity_policy import is_stageviva_eligible
+from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
 from source_registry import Source, get_active_sources
 from storage import StageVivaStorage
 
@@ -119,6 +119,10 @@ def run_pipeline(
                 continue
             if not is_stageviva_eligible(opportunity):
                 storage.reject_listing(item.listing_url, item.source_name, "education_or_training")
+                skipped_ineligible += 1
+                continue
+            if not has_verified_official_application_url(opportunity, item.listing_url):
+                storage.reject_listing(item.listing_url, item.source_name, "official_link_unverified")
                 skipped_ineligible += 1
                 continue
             opportunity_id = storage.upsert_opportunity(item, opportunity)

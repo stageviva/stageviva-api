@@ -61,6 +61,7 @@ class OpportunityPresentationTest(unittest.TestCase):
             "match": {"overall": {}},
         }
         self.assertIn("agency", opportunity_card(item)["categories"])
+        self.assertEqual(opportunity_card(item)["track"], "agency")
 
     def test_categories_use_structured_requirements_not_only_the_title(self) -> None:
         item = {
