@@ -335,6 +335,9 @@ async def lifespan(_: FastAPI):
         seeded = seed_catalogue_if_empty(storage)
         if seeded:
             logger.info("Seeded %s validated opportunities for a new database", seeded)
+        hidden = _hide_non_actionable_opportunities(storage)
+        if hidden:
+            logger.info("Hidden %s existing opportunities that no longer meet the live-feed standard", hidden)
         pending_users = storage.list_processing_cv_analyses()
         artists_to_refresh = storage.list_registered_artists() if seeded else []
     finally:
@@ -667,6 +670,28 @@ def _refresh_existing_artist_matches(artist_id: str, artist_dna: dict[str, Any])
         logger.exception("Catalogue refresh failed for artist %s", artist_id)
     finally:
         storage.close()
+
+
+def _hide_non_actionable_opportunities(storage: Storage) -> int:
+    """Move legacy entries failing today's publication rules to Content Review.
+
+    This is recoverable moderation, not deletion. The creator can add a verified
+    official URL and restore a hidden entry from Content Review.
+    """
+    hidden = 0
+    for item in storage.list_all_opportunities():
+        if not item["visible"]:
+            continue
+        opportunity = item["opportunity"]
+        is_live = (
+            is_stageviva_eligible(opportunity)
+            and is_current_opportunity(opportunity)
+            and has_verified_official_application_url(opportunity, item["listing_url"])
+        )
+        if not is_live:
+            storage.hide_opportunity(item["id"])
+            hidden += 1
+    return hidden
 
 
 def _run_daily_source_scan() -> None:
