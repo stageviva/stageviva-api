@@ -29,15 +29,24 @@ def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
     # A transition programme is allowed only when it is explicitly a pathway
     # into paid/professional work. General schools and classes never belong in
     # the performer opportunity feed.
-    transition_markers = (
-        "apprentice", "apprenticeship", "trainee", "young artist", "young-artist",
-        "pre-professional", "pre professional", "graduate company",
-        "paid graduate programme", "paid graduate program",
+    paid_work_markers = (
+        "paid employment", "employment", "employment contract", "contract",
+        "company position", "company dancer", "company artist", "vacancy", "job",
+        "engagement", "professional contract", "touring contract", "cruise contract",
+        "paid casting", "paid role",
     )
-    career_markers = (
-        "paid", "employment", "contract", "company position", "company dancer",
-        "job", "casting", "engagement", "professional company",
-        *transition_markers,
+    # These describe a credible step into professional work. A bare phrase such
+    # as "trainee programme" is not enough: many schools use that language for
+    # ordinary tuition.
+    qualifying_transition_markers = (
+        "company trainee", "trainee company", "professional trainee",
+        "professional apprenticeship", "company apprenticeship", "young artist programme",
+        "young artist program", "graduate company", "pre-professional company",
+        "pre professional company", "paid graduate programme", "paid graduate program",
+    )
+    agency_markers = (
+        "talent representation", "agency representation", "talent agency",
+        "dance agency", "casting agency",
     )
     education_markers = (
         "school", "academy", "academies", "summer intensive", "summer school", "weekend class", "classes",
@@ -49,14 +58,16 @@ def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
     is_training = any(marker in text for marker in education_markers)
     if is_training:
         # A study provider sometimes calls an ordinary course a "trainee"
-        # programme. Retain only explicit career-transition wording.
+        # programme. "Paid tuition" also does not make a course a job. Retain
+        # only explicit company or employment-transition wording.
         professional_pathway_markers = (
-            "paid", "employment", "apprenticeship", "young artist", "young-artist",
-            "pre-professional company", "pre professional company", "graduate company", "company contract",
+            *paid_work_markers, *qualifying_transition_markers,
         )
         if not any(marker in text for marker in professional_pathway_markers):
             return False
     # Unknown listings no longer pass by default. StageViva is a career feed,
-    # so each listing must identify paid/professional work or a qualifying
-    # trainee, apprenticeship or pre-professional pathway.
-    return any(marker in text for marker in career_markers)
+    # so each listing must identify professional work, a qualifying transition
+    # pathway, or an explicit professional-representation call.
+    return any(marker in text for marker in (
+        *paid_work_markers, *qualifying_transition_markers, *agency_markers,
+    ))

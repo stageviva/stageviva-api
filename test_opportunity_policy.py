@@ -42,3 +42,18 @@ class OpportunityPolicyTest(unittest.TestCase):
         self.assertTrue(is_stageviva_eligible(opportunity(
             opportunity_type="Trainee and company positions", description="Professional company trainee role.",
         )))
+
+    def test_rejects_a_bare_trainee_programme(self) -> None:
+        self.assertFalse(is_stageviva_eligible(opportunity(
+            opportunity_type="Trainee programme", description="Develop your technique through weekly classes.",
+        )))
+
+    def test_rejects_paid_tuition(self) -> None:
+        self.assertFalse(is_stageviva_eligible(opportunity(
+            opportunity_type="Dance academy course", description="Paid tuition for a one-year programme.",
+        )))
+
+    def test_keeps_explicit_agency_representation(self) -> None:
+        self.assertTrue(is_stageviva_eligible(opportunity(
+            opportunity_type="Professional dancer representation", description="Open submission for our talent agency.",
+        )))
