@@ -39,9 +39,14 @@ from native_push_notifications import (
     send_test_native_push_notification,
 )
 from opportunity_discovery import DiscoveredOpportunity
+from opportunity_intelligence import (
+    DiscoveryContext,
+    OpportunityFetchError,
+    analyse_opportunity,
+)
 from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
 from opportunity_lifecycle import is_current_opportunity
-from opportunity_presentation import matches_for_filters, opportunity_detail
+from opportunity_presentation import field_value, matches_for_filters, opportunity_detail
 from push_notifications import deliver_pending_push_notifications, public_vapid_key, send_test_push_notification
 from source_registry import get_active_sources
 from storage import StageVivaStorage
@@ -71,7 +76,7 @@ logger = logging.getLogger("stageviva.auth")
 SUPPORTED_EXTERNAL_JWT_ALGORITHMS = frozenset({
     "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA",
 })
-MEMBERSHIP_TIERS = frozenset({"beta", "free", "pro", "school"})
+MEMBERSHIP_TIERS = frozenset({"admin", "beta", "free", "pro", "school"})
 source_scan_lock = threading.Lock()
 
 
@@ -129,9 +134,13 @@ class AdminManualOpportunityRequest(BaseModel):
     description: str = Field(default="", max_length=3000)
 
 
+class AdminOpportunityUrlRequest(BaseModel):
+    official_url: str = Field(min_length=8, max_length=2048)
+
+
 class AdminMembershipUpdateRequest(BaseModel):
     """Creator-controlled complimentary access during the beta."""
-    membership_tier: str = Field(pattern="^(free|beta|pro|school)$")
+    membership_tier: str = Field(pattern="^(free|beta|pro|school|admin)$")
 
 
 class ArtistDNARequest(BaseModel):
@@ -170,7 +179,7 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "id": user["id"], "email": user["email"], "display_name": user["display_name"],
         "profile": user["profile"], "artist_id": user["artist_id"],
         "membership_tier": _membership_tier(user),
-        "is_admin": _is_admin_email(user["email"]),
+        "is_admin": _is_admin_user(user),
         "notification_preferences": {
             "email_notifications": user["email_notifications"],
             "in_app_notifications": user["in_app_notifications"],
@@ -192,7 +201,7 @@ def _access_for_user(user: dict[str, Any]) -> dict[str, Any]:
     paid plans are switched on.
     """
     tier = _membership_tier(user)
-    immediate_access = tier in {"beta", "pro", "school"}
+    immediate_access = tier in {"admin", "beta", "pro", "school"}
     return {
         "membership_tier": tier,
         "is_beta": tier == "beta",
@@ -317,8 +326,8 @@ def current_user(
 CurrentUser = Annotated[dict[str, Any], Depends(current_user)]
 
 
-def _is_admin_email(email: str) -> bool:
-    """Check the owner allow-list configured in Render without exposing it."""
+def _is_owner_email(email: str) -> bool:
+    """Check the founder allow-list configured in Render without exposing it."""
     allowed = {
         email.strip().casefold()
         for email in os.getenv("STAGEVIVA_ADMIN_EMAILS", "").split(",")
@@ -327,14 +336,29 @@ def _is_admin_email(email: str) -> bool:
     return email.casefold() in allowed
 
 
+def _is_admin_user(user: dict[str, Any]) -> bool:
+    """Allow founder-approved collaborators to moderate content, never self-promote."""
+    return _is_owner_email(user["email"]) or _membership_tier(user) == "admin"
+
+
 def require_admin(user: CurrentUser) -> dict[str, Any]:
-    """Restrict moderation to the owner emails configured in Render."""
-    if not _is_admin_email(user["email"]):
+    """Restrict moderation to the founder and approved admin collaborators."""
+    if not _is_admin_user(user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required.")
     return user
 
 
 AdminUser = Annotated[dict[str, Any], Depends(require_admin)]
+
+
+def require_owner(user: CurrentUser) -> dict[str, Any]:
+    """Only the founder can grant, revoke, or elevate account access."""
+    if not _is_owner_email(user["email"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Founder access required.")
+    return user
+
+
+OwnerUser = Annotated[dict[str, Any], Depends(require_owner)]
 
 
 @asynccontextmanager
@@ -1052,10 +1076,34 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
 
 
+def _admin_opportunity_view(item: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the current structured record so every editable field is pre-filled."""
+    opportunity = item["opportunity"]
+    return {
+        "opportunity_id": item["id"],
+        "title": item["title"],
+        "organisation": field_value(opportunity, "identity", "organisation"),
+        "role_summary": field_value(opportunity, "identity", "opportunity_type"),
+        "location": field_value(opportunity, "location", "city"),
+        "deadline": field_value(opportunity, "dates", "application_deadline"),
+        "official_url": field_value(opportunity, "application", "application_url")
+        or field_value(opportunity, "source", "official_url")
+        or item["listing_url"],
+        "listing_url": item["listing_url"],
+        "contract_type": field_value(opportunity, "contract_and_compensation", "contract_type"),
+        "description": field_value(opportunity, "identity", "description"),
+        "source": item["source_name"],
+        "visible": item["visible"],
+        "manual": item["category"] == "manual" or "manual" in item["source_name"].lower(),
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+    }
+
+
 @app.get("/admin/opportunities")
 def admin_list_opportunities(admin: AdminUser, storage: Storage) -> list[dict[str, Any]]:
-    """Owner-only import and moderation queue, including hidden listings."""
-    return storage.list_all_opportunities()
+    """Moderation queue, including hidden listings and all editable details."""
+    return [_admin_opportunity_view(item) for item in storage.list_all_opportunities()]
 
 
 @app.get("/admin/operations")
@@ -1093,7 +1141,7 @@ def admin_list_performers(admin: AdminUser, storage: Storage) -> list[dict[str, 
 
 @app.patch("/admin/performers/{user_id}/membership")
 def admin_update_performer_membership(
-    user_id: str, payload: AdminMembershipUpdateRequest, admin: AdminUser, storage: Storage,
+    user_id: str, payload: AdminMembershipUpdateRequest, admin: OwnerUser, storage: Storage,
 ) -> dict[str, Any]:
     updated = storage.update_membership_tier(user_id, payload.membership_tier)
     if not updated:
@@ -1129,6 +1177,48 @@ def admin_update_opportunity(
     )
     delivery = _deliver_queued_push_notifications(storage)
     return {"ok": True, **match_result, "notification_delivery": delivery}
+
+
+@app.post("/admin/opportunities/analyse-url")
+def admin_analyse_opportunity_url(
+    payload: AdminOpportunityUrlRequest, admin: AdminUser,
+) -> dict[str, Any]:
+    """Turn an official public listing URL into a creator-reviewable draft.
+
+    Nothing is published here: the creator sees the extracted fields first and
+    can correct them before saving the opportunity and matching performers.
+    """
+    url = payload.official_url.strip()
+    if not url.startswith(("https://", "http://")):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Use the public http(s) link to the opportunity.")
+    try:
+        opportunity = analyse_opportunity(url, DiscoveryContext(
+            source_name="StageViva creator URL", source_url=url, category="manual",
+        ))
+    except (OpportunityFetchError, RuntimeError) as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"StageViva could not analyse that page: {error}") from error
+
+    city = field_value(opportunity, "location", "city")
+    country = field_value(opportunity, "location", "country")
+    location = ", ".join(part for part in (city, country) if part and part.lower() != "unknown")
+    extracted_url = (
+        field_value(opportunity, "application", "application_url")
+        or field_value(opportunity, "source", "official_url")
+        or url
+    )
+    return {
+        "title": field_value(opportunity, "identity", "title"),
+        "organisation": field_value(opportunity, "identity", "organisation"),
+        "role_summary": field_value(opportunity, "identity", "opportunity_type"),
+        "location": location,
+        "deadline": field_value(opportunity, "dates", "application_deadline"),
+        "official_url": extracted_url,
+        "contract_type": field_value(opportunity, "contract_and_compensation", "contract_type"),
+        "description": field_value(opportunity, "identity", "description"),
+        "opportunity": opportunity,
+    }
 
 
 @app.post("/admin/opportunities", status_code=status.HTTP_201_CREATED)
