@@ -31,6 +31,11 @@ from cv_headshot import extract_cv_headshot
 from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
 from match_service import match_artist_to_opportunity
+from native_push_notifications import (
+    NativePushConfigurationError,
+    deliver_pending_native_push_notifications,
+    send_test_native_push_notification,
+)
 from opportunity_discovery import DiscoveredOpportunity
 from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
 from opportunity_lifecycle import is_current_opportunity
@@ -92,6 +97,11 @@ class NotificationPreferencesRequest(BaseModel):
 class PushSubscriptionRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=4096)
     keys: dict[str, str]
+
+
+class NativePushTokenRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=512)
+    platform: str = Field(default="ios", pattern="^ios$")
 
 
 class AdminOpportunityUpdateRequest(BaseModel):
@@ -719,6 +729,8 @@ def _run_daily_source_scan() -> None:
                 logger.info("Notification emails are queued; Resend is not configured yet")
             push_delivery = deliver_pending_push_notifications(storage)
             logger.info("Push notification delivery completed: %s", push_delivery)
+            native_push_delivery = deliver_pending_native_push_notifications(storage)
+            logger.info("Native push notification delivery completed: %s", native_push_delivery)
         finally:
             storage.close()
     except Exception:
@@ -1169,3 +1181,22 @@ def remove_push_subscription(payload: PushSubscriptionRequest, user: CurrentUser
 @app.post("/me/push-subscriptions/test")
 def test_push_subscription(user: CurrentUser, storage: Storage) -> dict[str, int]:
     return send_test_push_notification(storage, user["id"])
+
+
+@app.post("/me/native-push-tokens", status_code=status.HTTP_204_NO_CONTENT)
+def save_native_push_token(payload: NativePushTokenRequest, user: CurrentUser, storage: Storage) -> None:
+    """Save the APNs device token received by the installed iPhone app."""
+    storage.upsert_native_push_token(user["id"], payload.token, platform=payload.platform)
+
+
+@app.delete("/me/native-push-tokens", status_code=status.HTTP_204_NO_CONTENT)
+def remove_native_push_token(payload: NativePushTokenRequest, user: CurrentUser, storage: Storage) -> None:
+    storage.remove_native_push_token(user["id"], payload.token)
+
+
+@app.post("/me/native-push-tokens/test")
+def test_native_push_token(user: CurrentUser, storage: Storage) -> dict[str, int]:
+    try:
+        return send_test_native_push_notification(storage, user["id"])
+    except NativePushConfigurationError as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error

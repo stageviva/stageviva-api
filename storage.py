@@ -87,6 +87,10 @@ class StageVivaStorage:
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL, endpoint TEXT NOT NULL UNIQUE,
                 subscription_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS native_push_tokens (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token TEXT NOT NULL UNIQUE,
+                platform TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS push_deliveries (
                 notification_id TEXT NOT NULL, subscription_id TEXT NOT NULL,
                 delivered_at TEXT NOT NULL,
@@ -551,6 +555,36 @@ class StageVivaStorage:
         """, (user_id,)).fetchall()
         return [{"id": row["id"], "subscription": json.loads(row["subscription_json"])} for row in rows]
 
+    def upsert_native_push_token(self, user_id: str, token: str, *, platform: str) -> None:
+        """Register one APNs/FCM device token without mixing it with Web Push."""
+        token_id = _stable_id("native_push", f"{platform}:{token}")
+        now = _utc_now()
+        self.connection.execute("""
+            INSERT INTO native_push_tokens (id, user_id, token, platform, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id,
+                platform=excluded.platform, updated_at=excluded.updated_at
+        """, (token_id, user_id, token, platform, now, now))
+        self.connection.commit()
+
+    def remove_native_push_token(self, user_id: str, token: str) -> bool:
+        cursor = self.connection.execute(
+            "DELETE FROM native_push_tokens WHERE user_id = ? AND token = ?", (user_id, token),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def remove_native_push_token_by_id(self, token_id: str) -> bool:
+        cursor = self.connection.execute("DELETE FROM native_push_tokens WHERE id = ?", (token_id,))
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def list_native_push_tokens_for_user(self, user_id: str) -> list[dict[str, str]]:
+        rows = self.connection.execute("""
+            SELECT id, token, platform FROM native_push_tokens WHERE user_id = ?
+        """, (user_id,)).fetchall()
+        return [{"id": row["id"], "token": row["token"], "platform": row["platform"]} for row in rows]
+
     def pending_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.connection.execute("""
             SELECT notification_outbox.id AS notification_id, notification_outbox.match_json,
@@ -570,6 +604,24 @@ class StageVivaStorage:
         """, (limit,)).fetchall()
         return [{**dict(row), "match": json.loads(row["match_json"]),
                  "subscription": json.loads(row["subscription_json"])} for row in rows]
+
+    def pending_native_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute("""
+            SELECT notification_outbox.id AS notification_id, notification_outbox.match_json,
+                   opportunities.title, native_push_tokens.id AS token_id,
+                   native_push_tokens.token, native_push_tokens.platform
+            FROM notification_outbox
+            JOIN users ON users.artist_id = notification_outbox.artist_id
+            JOIN opportunities ON opportunities.id = notification_outbox.opportunity_id
+            JOIN native_push_tokens ON native_push_tokens.user_id = users.id
+            LEFT JOIN push_deliveries ON push_deliveries.notification_id = notification_outbox.id
+                AND push_deliveries.subscription_id = native_push_tokens.id
+            WHERE users.in_app_notifications = 1
+              AND push_deliveries.notification_id IS NULL
+              AND notification_outbox.created_at >= native_push_tokens.created_at
+            ORDER BY notification_outbox.created_at ASC LIMIT ?
+        """, (limit,)).fetchall()
+        return [{**dict(row), "match": json.loads(row["match_json"])} for row in rows]
 
     def mark_push_delivered(self, notification_id: str, subscription_id: str) -> None:
         self.connection.execute("""
