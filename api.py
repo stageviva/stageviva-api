@@ -372,7 +372,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="StageViva API", version="0.1.0", lifespan=lifespan)
 origins = [origin.strip() for origin in os.getenv(
-    "STAGEVIVA_CORS_ORIGINS", "http://localhost:5173,http://localhost:3000",
+    "STAGEVIVA_CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:3000,http://localhost,capacitor://localhost",
 ).split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware, allow_origins=origins, allow_credentials=True,
