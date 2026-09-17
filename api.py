@@ -741,6 +741,28 @@ def _run_daily_source_scan() -> None:
         source_scan_lock.release()
 
 
+def _deliver_queued_push_notifications(storage: StageVivaStorage) -> dict[str, Any]:
+    """Attempt immediate delivery after a creator publishes or changes a listing.
+
+    The daily source scan remains a safety net. Manual additions, however, are
+    expected to reach matching performers straight away rather than waiting for
+    tomorrow's scan.
+    """
+    result: dict[str, Any] = {}
+    try:
+        result["web"] = deliver_pending_push_notifications(storage)
+    except Exception:
+        logger.exception("Immediate web push delivery failed")
+        result["web"] = {"sent": 0, "failures": ["delivery failed"]}
+    try:
+        result["native"] = deliver_pending_native_push_notifications(storage)
+    except Exception:
+        logger.exception("Immediate native push delivery failed")
+        result["native"] = {"sent": 0, "failures": ["delivery failed"]}
+    logger.info("Immediate notification delivery completed: %s", result)
+    return result
+
+
 def _headshot_path(user_id: str) -> Path:
     """The only private on-disk headshot location for one performer."""
     return UPLOADS_DIR / user_id / "headshot.jpg"
@@ -1105,7 +1127,8 @@ def admin_update_opportunity(
         _match_opportunity_against_registered_artists(opportunity_id, updated_opportunity, storage)
         if updated_opportunity is not None else {"matched_artists": 0, "queued_notifications": 0}
     )
-    return {"ok": True, **match_result}
+    delivery = _deliver_queued_push_notifications(storage)
+    return {"ok": True, **match_result, "notification_delivery": delivery}
 
 
 @app.post("/admin/opportunities", status_code=status.HTTP_201_CREATED)
@@ -1136,7 +1159,9 @@ def admin_add_opportunity(
         payload.official_url.strip(), "manual", description=payload.description.strip(),
     )
     opportunity_id = storage.upsert_opportunity(item, opportunity)
-    return {"id": opportunity_id, **_match_opportunity_against_registered_artists(opportunity_id, opportunity, storage)}
+    match_result = _match_opportunity_against_registered_artists(opportunity_id, opportunity, storage)
+    delivery = _deliver_queued_push_notifications(storage)
+    return {"id": opportunity_id, **match_result, "notification_delivery": delivery}
 
 
 @app.get("/notifications")
