@@ -18,6 +18,10 @@ class NativePushConfigurationError(RuntimeError):
     """The service has not yet been given its Apple APNs credential."""
 
 
+class NativePushDeliveryError(RuntimeError):
+    """APNs refused a test notification after the device had registered."""
+
+
 def _private_key() -> str:
     encoded = os.getenv("STAGEVIVA_APNS_PRIVATE_KEY_BASE64", "").strip()
     if encoded:
@@ -112,6 +116,7 @@ def send_test_native_push_notification(storage: StageVivaStorage, user_id: str) 
     """Send a user-requested test alert to the caller's registered iPhone(s)."""
     _credentials()
     sent = 0
+    failures: list[str] = []
     for device in storage.list_native_push_tokens_for_user(user_id):
         if device["platform"] != "ios":
             continue
@@ -129,4 +134,10 @@ def send_test_native_push_notification(storage: StageVivaStorage, user_id: str) 
             sent += 1
         elif reason and any(reason.endswith(f":{value}") for value in {"BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"}):
             storage.remove_native_push_token_by_id(device["id"])
+            failures.append(reason)
+        elif reason:
+            failures.append(reason)
+    if not sent:
+        detail = ", ".join(failures) if failures else "No iPhone notification token is registered yet."
+        raise NativePushDeliveryError(detail)
     return {"sent": sent}

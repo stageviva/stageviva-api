@@ -33,6 +33,7 @@ from database_backups import create_database_backup, list_database_backups
 from match_service import match_artist_to_opportunity
 from native_push_notifications import (
     NativePushConfigurationError,
+    NativePushDeliveryError,
     deliver_pending_native_push_notifications,
     send_test_native_push_notification,
 )
@@ -1198,5 +1199,6 @@ def remove_native_push_token(payload: NativePushTokenRequest, user: CurrentUser,
 def test_native_push_token(user: CurrentUser, storage: Storage) -> dict[str, int]:
     try:
         return send_test_native_push_notification(storage, user["id"])
-    except NativePushConfigurationError as error:
+    except (NativePushConfigurationError, NativePushDeliveryError) as error:
+        logger.warning("Native notification test failed for %s: %s", user["id"], error)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
