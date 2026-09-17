@@ -8,6 +8,7 @@ import hmac
 import logging
 import json
 import threading
+import time
 from datetime import date, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
@@ -1197,6 +1198,31 @@ def remove_native_push_token(payload: NativePushTokenRequest, user: CurrentUser,
 
 @app.post("/me/native-push-tokens/test")
 def test_native_push_token(user: CurrentUser, storage: Storage) -> dict[str, int]:
+    # A push sent while the user is still looking at Settings is intentionally
+    # quiet on iOS. Delay the test so the person can lock their phone and see
+    # the same presentation that a real daily match will use.
+    if not storage.list_native_push_tokens_for_user(user["id"]):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="No iPhone notification token is registered yet.")
+
+    def deliver_after_lock_screen() -> None:
+        time.sleep(5)
+        background_storage = StageVivaStorage(DATABASE_PATH)
+        try:
+            result = send_test_native_push_notification(background_storage, user["id"])
+            logger.info("Native notification test delivered for %s: %s", user["id"], result)
+        except Exception:
+            logger.exception("Native notification test failed for %s", user["id"])
+        finally:
+            background_storage.close()
+
+    threading.Thread(target=deliver_after_lock_screen, daemon=True).start()
+    return {"scheduled": 1}
+
+
+@app.post("/me/native-push-tokens/test-now")
+def test_native_push_token_now(user: CurrentUser, storage: Storage) -> dict[str, int]:
+    """Diagnostic endpoint for server-side use; the Settings button uses the delayed test."""
     try:
         return send_test_native_push_notification(storage, user["id"])
     except (NativePushConfigurationError, NativePushDeliveryError) as error:
