@@ -466,7 +466,7 @@ def get_my_access(user: CurrentUser) -> dict[str, Any]:
 
 
 def _require_premium_access(user: dict[str, Any]) -> None:
-    if _membership_tier(user) not in {"beta", "pro", "school"}:
+    if _membership_tier(user) not in {"admin", "beta", "pro", "school"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This Premium profile insight is not included with Free access.",

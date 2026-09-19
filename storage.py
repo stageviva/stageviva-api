@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +20,16 @@ def _utc_now() -> str:
 
 def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}_{hashlib.sha256(value.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _new_account_membership_tier() -> str:
+    """Keep early beta invites unlocked without changing existing accounts.
+
+    Render can later set STAGEVIVA_DEFAULT_MEMBERSHIP_TIER=free when StageViva
+    launches publicly; an invalid value fails safely to beta during this test.
+    """
+    tier = os.getenv("STAGEVIVA_DEFAULT_MEMBERSHIP_TIER", "beta").strip().lower()
+    return tier if tier in {"free", "beta", "pro", "school"} else "beta"
 
 
 class StageVivaStorage:
@@ -269,11 +280,12 @@ class StageVivaStorage:
     def create_user(self, email: str, password_hash: str, display_name: str) -> dict[str, Any]:
         user_id = _stable_id("user", email.lower())
         now = _utc_now()
+        membership_tier = _new_account_membership_tier()
         try:
             self.connection.execute("""
                 INSERT INTO users (id, email, password_hash, display_name, membership_tier, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'free', ?, ?)
-            """, (user_id, email.lower(), password_hash, display_name, now, now))
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, email.lower(), password_hash, display_name, membership_tier, now, now))
             self.connection.commit()
         except sqlite3.IntegrityError as error:
             raise ValueError("An account with this email already exists.") from error
@@ -320,11 +332,12 @@ class StageVivaStorage:
         safe_email = str(email or f"{external_auth_id}@lovable-auth.invalid").lower()
         safe_name = str(display_name or "StageViva performer").strip() or "StageViva performer"
         now = _utc_now()
+        membership_tier = _new_account_membership_tier()
         self.connection.execute("""
             INSERT INTO users (
                 id, email, password_hash, display_name, external_auth_id, membership_tier, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'free', ?, ?)
-        """, (user_id, safe_email, "external-auth-managed", safe_name, external_auth_id, now, now))
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, safe_email, "external-auth-managed", safe_name, external_auth_id, membership_tier, now, now))
         self.connection.commit()
         return self.get_user(user_id)  # type: ignore[return-value]
 
