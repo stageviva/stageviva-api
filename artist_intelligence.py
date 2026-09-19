@@ -497,6 +497,17 @@ Extract:
 
 Only when supported by the CV.
 
+Nationality is a legal or personal national identity, such as "British",
+"Spanish", "Irish", or "French". Extract it only when the CV explicitly
+labels it as nationality, citizenship, passport/work nationality, or plainly
+states that the performer is a national of that country.
+
+Never use ethnicity, heritage, casting type, appearance, complexion, or a
+"looks" line as nationality. In particular, terms such as "Hispanic",
+"Mediterranean", "Latino", "mixed race", or "ethnically ambiguous" are not
+nationalities. They must not populate identity.nationality and must not affect
+location, work rights, eligibility, or matching.
+
 If not available:
 
 "unknown"
@@ -608,7 +619,8 @@ def analyse_artist(
         artist = _audit_artist_dna(artist, cv_text, active_client)
         artist = _normalise_artist_disciplines(artist)
         artist = _supplement_explicit_performance_disciplines(artist, cv_text)
-        return _cap_training_only_classical_ballet(artist)
+        artist = _cap_training_only_classical_ballet(artist)
+        return _remove_appearance_from_nationality(artist)
 
     except json.JSONDecodeError as error:
         raise ArtistAnalysisError(
@@ -623,6 +635,26 @@ _DISCIPLINE_ALIASES = {
     "musical theater": "musical_theatre",
     "hip hop": "hip_hop",
 }
+
+
+def _remove_appearance_from_nationality(artist: dict[str, Any]) -> dict[str, Any]:
+    """Prevent casting-look labels from being shown as a performer's nationality.
+
+    This is a final deterministic safeguard after both AI extraction passes.
+    It deliberately does not infer a replacement nationality: the performer can
+    confirm it in their editable profile when their CV does not state one.
+    """
+    identity = artist.get("identity")
+    if not isinstance(identity, dict):
+        return artist
+    nationality = str(identity.get("nationality") or "").strip()
+    appearance_markers = (
+        "hispanic", "mediterranean", "latino", "latina", "ethnicity",
+        "ethnic", "mixed race", "ethnically ambiguous", "appearance", "looks",
+    )
+    if any(marker in nationality.casefold() for marker in appearance_markers):
+        identity["nationality"] = "unknown"
+    return artist
 
 
 def _material_credit_lines(cv_text: str) -> list[str]:
