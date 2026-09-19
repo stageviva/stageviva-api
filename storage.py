@@ -406,13 +406,10 @@ class StageVivaStorage:
             "SELECT COUNT(*) FROM cv_upload_events WHERE user_id = ?", (user_id,),
         ).fetchone()[0])
 
-    def reserve_cv_upload(self, user_id: str, *, maximum: int = 2) -> bool:
-        """Atomically reserve one of a performer's limited CV analyses."""
+    def reserve_cv_upload(self, user_id: str) -> bool:
+        """Record a CV analysis while allowing performers to update freely."""
         self.connection.execute("BEGIN IMMEDIATE")
         try:
-            if self.cv_upload_count(user_id) >= maximum:
-                self.connection.rollback()
-                return False
             now = _utc_now()
             self.connection.execute(
                 "INSERT INTO cv_upload_events (id, user_id, created_at) VALUES (?, ?, ?)",
