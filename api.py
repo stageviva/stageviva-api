@@ -792,6 +792,22 @@ def _headshot_path(user_id: str) -> Path:
     return UPLOADS_DIR / user_id / "headshot.jpg"
 
 
+def _latest_cv_path(user_id: str) -> Path | None:
+    """Return one performer's current CV without allowing path traversal."""
+    uploads_root = UPLOADS_DIR.resolve()
+    user_directory = (UPLOADS_DIR / user_id).resolve()
+    try:
+        user_directory.relative_to(uploads_root)
+    except ValueError:
+        return None
+    files = sorted(
+        (path for path in user_directory.glob("cv.*") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return files[0] if files else None
+
+
 def _headshot_check_marker(user_id: str) -> Path:
     """Remember that this uploaded CV has already been assessed for a portrait."""
     return UPLOADS_DIR / user_id / ".headshot_checked"
@@ -1137,6 +1153,31 @@ def admin_operations(admin: AdminUser, storage: Storage) -> dict[str, Any]:
 def admin_list_performers(admin: AdminUser, storage: Storage) -> list[dict[str, Any]]:
     """Private creator overview. It exposes profiles, never passwords or CV files."""
     return storage.list_performers_for_admin()
+
+
+@app.get("/admin/performers/{user_id}/cv")
+def admin_get_performer_cv(user_id: str, owner: OwnerUser, storage: Storage) -> FileResponse:
+    """Let the founder review an uploaded CV during private beta support.
+
+    This deliberately remains owner-only: collaborators who can moderate
+    opportunities never receive access to performers' original documents.
+    """
+    if not storage.get_user(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Performer not found.")
+    cv_path = _latest_cv_path(user_id)
+    if cv_path is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="This performer has not uploaded a CV.")
+    media_types = {
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".txt": "text/plain; charset=utf-8",
+    }
+    return FileResponse(
+        cv_path,
+        media_type=media_types.get(cv_path.suffix.lower(), "application/octet-stream"),
+        filename=f"stageviva-performer-cv{cv_path.suffix.lower()}",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @app.patch("/admin/performers/{user_id}/membership")
