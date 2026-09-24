@@ -674,7 +674,7 @@ def _match_artist_against_catalogue(
             continue
         storage.upsert_match(artist_id, opportunity_id, result)
         matched += 1
-        if result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
+        if _is_actionable_match(result) and result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
             queued += int(storage.queue_notification(artist_id, opportunity_id, result))
     return {"matched_opportunities": matched, "queued_notifications": queued}
 
@@ -688,7 +688,7 @@ def _match_opportunity_against_registered_artists(
         result = match_artist_to_opportunity(artist_dna, opportunity)
         storage.upsert_match(artist_id, opportunity_id, result)
         matched += 1
-        if result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
+        if _is_actionable_match(result) and result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
             queued += int(storage.queue_notification(artist_id, opportunity_id, result))
     return {"matched_artists": matched, "queued_notifications": queued}
 
@@ -707,6 +707,28 @@ def _refresh_existing_artist_matches(artist_id: str, artist_dna: dict[str, Any])
         logger.exception("Catalogue refresh failed for artist %s", artist_id)
     finally:
         storage.close()
+
+
+def _is_actionable_match(match: dict[str, Any]) -> bool:
+    """Keep clear eligibility conflicts out of a performer's live feed.
+
+    A low artistic score can still be useful context, but a role the performer
+    is explicitly ineligible for is not a recommendation. In particular this
+    prevents gender-specific roles from producing the misleading "Why this
+    suits you" presentation, alerts, or push notifications seen in beta.
+    """
+    overall = match.get("overall", {}) if isinstance(match, dict) else {}
+    if overall.get("recommendation") == "not_recommended":
+        return False
+    eligibility = match.get("eligibility", {}) if isinstance(match, dict) else {}
+    if eligibility.get("status") == "ineligible":
+        return False
+    physical = match.get("physical_match", {}) if isinstance(match, dict) else {}
+    for requirement in ("gender", "age", "height"):
+        if isinstance(physical.get(requirement), dict) and physical[requirement].get("status") == "ineligible":
+            return False
+    dates = match.get("dates", {}) if isinstance(match, dict) else {}
+    return dates.get("status") != "conflict"
 
 
 def _hide_non_actionable_opportunities(storage: Storage) -> int:
@@ -1056,7 +1078,8 @@ def list_matches(
     }
     matches = [
         item for item in storage.list_matches_for_user(user["id"])
-        if (is_stageviva_eligible(item["opportunity"])
+        if (_is_actionable_match(item["match"])
+            and is_stageviva_eligible(item["opportunity"])
             and is_current_opportunity(item["opportunity"])
             and has_verified_official_application_url(item["opportunity"], item["listing_url"]))
     ]
@@ -1071,7 +1094,8 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
     # app may use it while the main match feed is loading.
     matches = [
         item for item in storage.list_matches_for_user(user["id"])
-        if (is_stageviva_eligible(item["opportunity"])
+        if (_is_actionable_match(item["match"])
+            and is_stageviva_eligible(item["opportunity"])
             and is_current_opportunity(item["opportunity"])
             and has_verified_official_application_url(item["opportunity"], item["listing_url"]))
     ]
@@ -1082,7 +1106,8 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
 def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) -> dict[str, Any]:
     """Return a clean detail screen for one recommendation."""
     for item in storage.list_matches_for_user(user["id"]):
-        if (item["opportunity_id"] == opportunity_id and is_stageviva_eligible(item["opportunity"])
+        if (item["opportunity_id"] == opportunity_id and _is_actionable_match(item["match"])
+                and is_stageviva_eligible(item["opportunity"])
                 and is_current_opportunity(item["opportunity"])
                 and has_verified_official_application_url(item["opportunity"], item["listing_url"])):
             return opportunity_detail(item)
@@ -1294,7 +1319,10 @@ def admin_add_opportunity(
 
 @app.get("/notifications")
 def list_notifications(user: CurrentUser, storage: Storage) -> list[dict[str, Any]]:
-    return storage.list_notifications_for_user(user["id"])
+    return [
+        item for item in storage.list_notifications_for_user(user["id"])
+        if _is_actionable_match(item["match"])
+    ]
 
 
 @app.post("/notifications/{notification_id}/read")
