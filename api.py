@@ -7,6 +7,7 @@ import secrets
 import hmac
 import logging
 import json
+import mimetypes
 import threading
 import time
 from datetime import date, datetime
@@ -810,8 +811,42 @@ def _deliver_queued_push_notifications(storage: StageVivaStorage) -> dict[str, A
 
 
 def _headshot_path(user_id: str) -> Path:
-    """The only private on-disk headshot location for one performer."""
+    """The private CV-extracted headshot location for one performer."""
     return UPLOADS_DIR / user_id / "headshot.jpg"
+
+
+def _manual_headshot_path(user_id: str) -> Path | None:
+    """Return a performer's chosen image, if one has replaced the CV extract."""
+    user_directory = UPLOADS_DIR / user_id
+    for suffix in (".jpg", ".png", ".webp"):
+        candidate = user_directory / f"manual-headshot{suffix}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _available_headshot_path(user_id: str) -> Path | None:
+    """A manual choice always takes precedence over an image found in a CV."""
+    manual = _manual_headshot_path(user_id)
+    if manual:
+        return manual
+    extracted = _headshot_path(user_id)
+    return extracted if extracted.is_file() else None
+
+
+def _headshot_upload_suffix(content: bytes) -> str | None:
+    """Recognise a small safe set of image formats from file signatures.
+
+    The file name and browser-provided MIME type are both user-controlled, so
+    they are not sufficient validation for a private user upload.
+    """
+    if content.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return ".webp"
+    return None
 
 
 def _latest_cv_path(user_id: str) -> Path | None:
@@ -850,7 +885,7 @@ def _set_cv_headshot_available(user_id: str, artist_dna: dict[str, Any]) -> None
 def _backfill_cv_headshot(user_id: str) -> None:
     """Inspect one older CV once, keeping existing profiles and uploads intact."""
     headshot_path = _headshot_path(user_id)
-    if headshot_path.is_file() or _headshot_check_marker(user_id).is_file():
+    if _available_headshot_path(user_id) or _headshot_check_marker(user_id).is_file():
         return
     user_directory = UPLOADS_DIR / user_id
     files = sorted(user_directory.glob("cv.*"), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -876,10 +911,13 @@ def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
     try:
         artist_dna = analyse_artist(cv_path)
         headshot_path = _headshot_path(user_id)
-        found_new_headshot = extract_cv_headshot(cv_path, headshot_path)
+        # A performer-selected portrait is never replaced by a later CV
+        # upload. CV extraction remains a helpful fallback only.
+        has_manual_headshot = _manual_headshot_path(user_id) is not None
+        found_new_headshot = False if has_manual_headshot else extract_cv_headshot(cv_path, headshot_path)
         # A prior confirmed CV headshot remains private and available if a
         # later text-only CV contains no new portrait.
-        if found_new_headshot or headshot_path.is_file():
+        if found_new_headshot or _available_headshot_path(user_id):
             _set_cv_headshot_available(user_id, artist_dna)
         _mark_headshot_checked(user_id)
         _store_and_match_artist(user_id, artist_dna, storage)
@@ -898,14 +936,55 @@ def save_artist_dna(payload: ArtistDNARequest, user: CurrentUser, storage: Stora
 
 @app.get("/me/headshot")
 def get_headshot(user: CurrentUser) -> FileResponse:
-    """Return the signed-in performer's private CV headshot, if one exists."""
-    headshot = _headshot_path(user["id"])
-    if not headshot.is_file():
+    """Return the signed-in performer's chosen or CV-extracted headshot."""
+    headshot = _available_headshot_path(user["id"])
+    if not headshot:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No headshot is available yet.")
     return FileResponse(
-        headshot, media_type="image/jpeg", filename="stageviva-headshot.jpg",
+        headshot,
+        media_type=mimetypes.guess_type(headshot.name)[0] or "application/octet-stream",
+        filename=f"stageviva-headshot{headshot.suffix}",
         headers={"Cache-Control": "private, no-store"},
     )
+
+
+@app.put("/me/headshot")
+async def upload_headshot(
+    user: CurrentUser, storage: Storage, headshot: UploadFile = File(...),
+) -> dict[str, str]:
+    """Safely replace the private portrait used on the performer's profile."""
+    content = await headshot.read()
+    if not content or len(content) > 10 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Headshot must be an image between 1 byte and 10 MB.",
+        )
+    suffix = _headshot_upload_suffix(content)
+    if not suffix:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Upload a JPEG, PNG, or WebP image for your headshot.",
+        )
+
+    user_directory = UPLOADS_DIR / user["id"]
+    user_directory.mkdir(parents=True, exist_ok=True)
+    target = user_directory / f"manual-headshot{suffix}"
+    temporary = user_directory / f".manual-headshot{suffix}.upload"
+    temporary.write_bytes(content)
+    temporary.replace(target)
+    for other_suffix in (".jpg", ".png", ".webp"):
+        alternate = user_directory / f"manual-headshot{other_suffix}"
+        if alternate != target:
+            alternate.unlink(missing_ok=True)
+
+    artist = storage.get_artist_for_user(user["id"])
+    if artist:
+        updated_dna = artist["dna"]
+        physical = updated_dna.setdefault("physical", {})
+        physical["headshot_available"] = True
+        physical["headshot_source"] = "manual"
+        storage.upsert_artist_for_user(user["id"], updated_dna)
+    return {"status": "saved", "source": "manual"}
 
 
 def _deep_merge(existing: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
