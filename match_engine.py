@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+from datetime import date
 from typing import Any, Optional
 
 from dotenv import load_dotenv
@@ -278,7 +279,7 @@ or:
 Do not assume citizenship, visa status or work authorization.
 
 ============================================================
-11. DATES
+11. DATES AND AVAILABILITY
 
 Compare opportunity dates with the artist's available dates ONLY
 if availability information exists in the Artist DNA.
@@ -288,6 +289,20 @@ Do not invent availability.
 If there is no artist availability information:
 
 use "unknown".
+
+For relative availability such as "Within 3 months", interpret it from the
+explicit confirmation date supplied with the Artist DNA, not as a permanent
+statement. The artist may still sensibly apply to an audition before they can
+start work, especially when the contract begins later.
+
+Keep application/audition dates separate from contract start dates:
+
+- A near application deadline is not, by itself, an availability conflict.
+- If the contract clearly starts before the artist's stated availability, make
+  this a soft negative and explain it. Do not make it ineligible unless the
+  supplied dates make the conflict certain and material.
+- If the contract starts at or after the artist's estimated availability,
+  treat the timing as compatible even when the audition is sooner.
 
 ============================================================
 12. PREFERENCES
@@ -782,7 +797,15 @@ def match_artist_to_opportunity(
 
     load_dotenv()
 
+    preferences = artist_dna.get("preferences", {}) if isinstance(artist_dna, dict) else {}
+    availability = preferences.get("availability", "unknown") if isinstance(preferences, dict) else "unknown"
+    confirmed_at = preferences.get("availability_confirmed_at", "unknown") if isinstance(preferences, dict) else "unknown"
     prompt = (
+        "MATCHING DATE CONTEXT\n"
+        "=====================\n"
+        f"Today: {date.today().isoformat()}\n"
+        f"Artist availability: {availability}\n"
+        f"Artist last confirmed this availability: {confirmed_at}\n\n"
         "ARTIST DNA\n"
         "==========\n"
         f"{json.dumps(artist_dna, ensure_ascii=False, indent=2)}\n\n"

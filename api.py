@@ -586,6 +586,25 @@ def _normalise_gender(value: Any) -> str:
     return _GENDER_ALIASES.get(str(value or "").strip().lower(), "unknown")
 
 
+def _availability_review_due(preferences: dict[str, Any], today: date | None = None) -> bool:
+    """Ask performers to reconfirm a relative start window about monthly."""
+    if _is_missing(preferences.get("availability")):
+        return False
+    confirmed_at = str(preferences.get("availability_confirmed_at") or "").strip()
+    try:
+        last_confirmation = date.fromisoformat(confirmed_at)
+    except ValueError:
+        # Older CVs have an availability value but no moment attached to it.
+        # One gentle prompt establishes the first reliable anchor.
+        return True
+    return ((today or date.today()) - last_confirmation).days >= 30
+
+
+def _confirm_availability(preferences: dict[str, Any], value: str) -> None:
+    preferences["availability"] = value
+    preferences["availability_confirmed_at"] = date.today().isoformat()
+
+
 def _matching_profile_questions(artist_dna: dict[str, Any]) -> list[dict[str, Any]]:
     """Return only short, actionable questions that influence matching."""
     identity = artist_dna.get("identity", {})
@@ -612,6 +631,14 @@ def _matching_profile_questions(artist_dna: dict[str, Any]) -> list[dict[str, An
         questions.append({
             "id": "availability", "question": "When are you next available for a new contract?",
             "type": "single_select", "options": ["Available now", "Within 1 month", "Within 3 months", "Choose a date"],
+        })
+    elif _availability_review_due(preferences):
+        questions.append({
+            "id": "availability_review",
+            "question": "Is your current availability still right?",
+            "type": "single_select",
+            "options": ["Available now", "Within 1 month", "Within 3 months", "Choose a date"],
+            "current_value": str(preferences.get("availability")),
         })
     if _is_missing(preferences.get("relocation_preferences")):
         questions.append({
@@ -1030,8 +1057,11 @@ def _apply_profile_answers_locally(
             identity["age"] = age
         elif question in {"current_location", "where are you currently based?"}:
             identity["location"] = value
-        elif question in {"availability", "when are you next available for a new contract?"}:
-            preferences["availability"] = value
+        elif question in {
+            "availability", "availability_review", "when are you next available for a new contract?",
+            "is your current availability still right?",
+        }:
+            _confirm_availability(preferences, value)
         elif question in {"relocation", "would you be willing to relocate for the right opportunity?"}:
             preferences["relocation_preferences"] = value
         elif question in {"contract_preferences", "what kinds of opportunity are you looking for?"}:
@@ -1054,6 +1084,12 @@ def update_artist_dna(payload: ArtistDNAUpdateRequest, user: CurrentUser, storag
     if not payload.updates:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No profile changes supplied.")
     updated_dna = _deep_merge(artist["dna"], payload.updates)
+    preference_updates = payload.updates.get("preferences")
+    if isinstance(preference_updates, dict) and "availability" in preference_updates:
+        _confirm_availability(
+            updated_dna.setdefault("preferences", {}),
+            str(preference_updates["availability"] or "").strip(),
+        )
     _synchronise_date_of_birth(updated_dna.setdefault("identity", {}))
     outcome = _store_and_match_artist(user["id"], updated_dna, storage)
     return {"artist_dna": _artist_dna_with_profile_questions(updated_dna), **outcome}
