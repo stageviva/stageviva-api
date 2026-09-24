@@ -278,6 +278,17 @@ or:
 
 Do not assume citizenship, visa status or work authorization.
 
+When the artist explicitly records work rights for particular places, use that
+information. For example, "Right to work in UK & Europe" does not establish a
+right to work in the United States. A US role without stated visa support must
+not be a strong match for that performer: use "possible_issue", explain the
+visa uncertainty and keep the score meaningfully below comparable roles in
+their confirmed work-rights region. Only use "ineligible" when the supplied
+artist data explicitly says they cannot meet a stated requirement.
+
+If the opportunity explicitly offers visa/work-permit sponsorship or support,
+do not treat missing work rights as a conflict; state the support accurately.
+
 ============================================================
 11. DATES AND AVAILABILITY
 
@@ -329,6 +340,12 @@ factor for a German opportunity.
 
 But preference for Germany does not make an otherwise impossible
 work-rights situation eligible.
+
+Explicit preferred locations are a meaningful ranking factor. A performer who
+prefers the UK and Europe, even when open to international relocation, should
+normally see equivalent UK/Europe roles ahead of US roles. International
+opportunities can still be shown when artistically suitable; they simply must
+not receive the same top ranking without a location or visa advantage.
 
 ============================================================
 13. SCORE
