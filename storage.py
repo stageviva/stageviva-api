@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -20,6 +21,77 @@ def _utc_now() -> str:
 
 def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}_{hashlib.sha256(value.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _document_text(document: dict[str, Any], *path: str) -> str:
+    value: Any = document
+    for key in path:
+        if not isinstance(value, dict):
+            return ""
+        value = value.get(key)
+    if isinstance(value, dict):
+        value = value.get("value", "")
+    return str(value or "").strip()
+
+
+def _known_text(value: str) -> bool:
+    return bool(value.strip()) and value.strip().lower() not in {"unknown", "not specified", "n/a"}
+
+
+def _canonical_url(opportunity: dict[str, Any], fallback: str) -> str:
+    for value in (
+        _document_text(opportunity, "application", "application_url"),
+        _document_text(opportunity, "source", "official_url"),
+        fallback,
+    ):
+        if value.startswith(("https://", "http://")):
+            return value.rstrip("/").lower()
+    return ""
+
+
+def _title_tokens(value: str) -> set[str]:
+    return {
+        token for token in re.findall(r"[a-z0-9]+", value.lower())
+        if len(token) > 2 and token not in {"the", "and", "for", "with", "from", "are", "that"}
+    }
+
+
+def _same_live_opportunity(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """Identify reposts of one casting without merging distinct roles blindly."""
+    first_opportunity = first["opportunity"]
+    second_opportunity = second["opportunity"]
+    first_url = _canonical_url(first_opportunity, str(first["listing_url"]))
+    second_url = _canonical_url(second_opportunity, str(second["listing_url"]))
+    if first_url and second_url and first_url == second_url:
+        return True
+
+    # Some boards create two URLs for the same casting. Only merge these when
+    # the source, deadline, city and most of the advertised title agree.
+    if str(first["source_name"]).casefold() != str(second["source_name"]).casefold():
+        return False
+    first_deadline = _document_text(first_opportunity, "dates", "application_deadline").casefold()
+    second_deadline = _document_text(second_opportunity, "dates", "application_deadline").casefold()
+    first_city = _document_text(first_opportunity, "location", "city").casefold()
+    second_city = _document_text(second_opportunity, "location", "city").casefold()
+    if not (_known_text(first_deadline) and first_deadline == second_deadline and _known_text(first_city) and first_city == second_city):
+        return False
+    first_title = _title_tokens(str(first["title"]))
+    second_title = _title_tokens(str(second["title"]))
+    if not first_title or not second_title:
+        return False
+    return len(first_title & second_title) / max(len(first_title), len(second_title)) >= 0.55
+
+
+def _opportunity_quality(item: dict[str, Any]) -> int:
+    opportunity = item["opportunity"]
+    fields = (
+        _document_text(opportunity, "identity", "organisation"),
+        _document_text(opportunity, "identity", "description"),
+        _document_text(opportunity, "location", "country"),
+        _document_text(opportunity, "dates", "application_deadline"),
+        _document_text(opportunity, "application", "application_url"),
+    )
+    return sum(_known_text(value) for value in fields)
 
 
 def _new_account_membership_tier() -> str:
@@ -185,6 +257,38 @@ class StageVivaStorage:
             (_utc_now(), opportunity_id),
         )
         self.connection.commit()
+
+    def hide_duplicate_opportunities(self) -> int:
+        """Hide repeated live listings, retaining the best populated version.
+
+        This is moderation rather than deletion: a founder can still inspect
+        or restore a hidden row in Content Review if two apparently similar
+        listings prove to be separate castings.
+        """
+        live = [item for item in self.list_all_opportunities() if item["visible"]]
+        retained: list[dict[str, Any]] = []
+        duplicates: set[str] = set()
+        for candidate in live:
+            duplicate_index = next(
+                (index for index, primary in enumerate(retained) if _same_live_opportunity(primary, candidate)),
+                None,
+            )
+            if duplicate_index is None:
+                retained.append(candidate)
+                continue
+            primary = retained[duplicate_index]
+            if _opportunity_quality(candidate) > _opportunity_quality(primary):
+                duplicates.add(str(primary["id"]))
+                retained[duplicate_index] = candidate
+            else:
+                duplicates.add(str(candidate["id"]))
+        if duplicates:
+            self.connection.executemany(
+                "UPDATE opportunities SET visible = 0, updated_at = ? WHERE id = ?",
+                [(_utc_now(), opportunity_id) for opportunity_id in duplicates],
+            )
+            self.connection.commit()
+        return len(duplicates)
 
     def set_opportunity_visibility(self, opportunity_id: str, visible: bool) -> bool:
         cursor = self.connection.execute("""

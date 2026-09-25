@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from match_engine import _apply_gender_requirement_guard, _apply_requirement_guards, _calibrate_evidence_score
+from match_engine import (
+    _apply_gender_requirement_guard,
+    _apply_location_and_work_rights_guard,
+    _apply_requirement_guards,
+    _calibrate_evidence_score,
+)
 
 
 class MatchRequirementGuardsTest(unittest.TestCase):
@@ -72,6 +77,33 @@ class MatchRequirementGuardsTest(unittest.TestCase):
         opportunity = {"requirements": {"physical": {"gender_requirement": {"value": "Male & Female acrobatic duos"}}}}
         result = {"overall": {"match_score": 87}, "gaps": []}
         self.assertEqual(_apply_gender_requirement_guard(artist, opportunity, result)["overall"]["match_score"], 87)
+
+    def test_unconfirmed_us_work_rights_cap_an_otherwise_strong_match(self) -> None:
+        artist = {
+            "eligibility": {"work_rights": ["United Kingdom", "European Union"]},
+            "preferences": {"preferred_locations": ["United Kingdom", "Europe"]},
+        }
+        opportunity = {
+            "location": {"city": {"value": "New York"}, "country": {"value": "United States"}},
+            "requirements": {"work_rights_or_visa": {"value": "Not specified"}},
+            "contract_and_compensation": {"visa_support": {"value": "Not specified"}},
+        }
+        result = {"overall": {"match_score": 91, "recommendation": "strong_match"}, "gaps": []}
+        guarded = _apply_location_and_work_rights_guard(artist, opportunity, result)
+        self.assertEqual(guarded["overall"]["match_score"], 40)
+        self.assertEqual(guarded["overall"]["recommendation"], "weak_match")
+        self.assertEqual(guarded["eligibility"]["status"], "possible_issue")
+
+    def test_stated_visa_support_keeps_an_overseas_opportunity_possible(self) -> None:
+        artist = {"eligibility": {"work_rights": ["United Kingdom", "European Union"]}}
+        opportunity = {
+            "location": {"country": {"value": "United States"}},
+            "contract_and_compensation": {"visa_support": {"value": "Visa sponsorship provided"}},
+        }
+        result = {"overall": {"match_score": 91, "recommendation": "strong_match"}, "gaps": []}
+        guarded = _apply_location_and_work_rights_guard(artist, opportunity, result)
+        self.assertEqual(guarded["overall"]["match_score"], 70)
+        self.assertEqual(guarded["overall"]["recommendation"], "possible_match")
 
 
 if __name__ == "__main__":

@@ -685,6 +685,123 @@ def _apply_gender_requirement_guard(
     return result
 
 
+_EUROPEAN_UNION_COUNTRIES = frozenset({
+    "austria", "belgium", "bulgaria", "croatia", "cyprus", "czechia", "czech republic",
+    "denmark", "estonia", "finland", "france", "germany", "greece", "hungary", "ireland",
+    "italy", "latvia", "lithuania", "luxembourg", "malta", "netherlands", "poland",
+    "portugal", "romania", "slovakia", "slovenia", "spain", "sweden",
+})
+
+
+def _field_text(document: dict[str, Any], *path: str) -> str:
+    value: Any = document
+    for key in path:
+        if not isinstance(value, dict):
+            return ""
+        value = value.get(key)
+    if isinstance(value, dict):
+        value = value.get("value", "")
+    return str(value or "").strip()
+
+
+def _location_regions(value: Any) -> set[str]:
+    """Map only explicit country/region wording to work-rights regions."""
+    text = " ".join(str(part) for part in value) if isinstance(value, list) else str(value or "")
+    normalized = text.strip().lower()
+    if not normalized:
+        return set()
+    regions: set[str] = set()
+    if any(term in normalized for term in ("worldwide", "world wide", "international", "open to all")):
+        regions.add("worldwide")
+    if any(term in normalized for term in ("united kingdom", " uk", "u.k.", "britain", "england", "scotland", "wales", "northern ireland")):
+        regions.add("uk")
+    if any(term in normalized for term in ("european union", "europe", " eu", "e.u.")) or normalized in _EUROPEAN_UNION_COUNTRIES:
+        regions.add("eu")
+    if any(term in normalized for term in ("united states", "usa", "u.s.a", "america", "new york", "puerto rico", "canada")):
+        regions.add("north_america")
+    if any(term in normalized for term in ("australia", "new zealand", "asia", "pacific", "japan", "singapore")):
+        regions.add("asia_pacific")
+    return regions
+
+
+def _has_stated_visa_support(opportunity: dict[str, Any]) -> bool:
+    text = " ".join((
+        _field_text(opportunity, "requirements", "work_rights_or_visa"),
+        _field_text(opportunity, "contract_and_compensation", "visa_support"),
+    )).lower()
+    if not text or text in {"unknown", "not specified", "n/a"}:
+        return False
+    return any(term in text for term in (
+        "visa support", "visa sponsorship", "sponsor", "work permit support", "permit support",
+        "visa provided", "work permit provided",
+    ))
+
+
+def _add_gap(result: dict[str, Any], *, factor: str, description: str) -> None:
+    gaps = result.setdefault("gaps", [])
+    if not any(description == item.get("description") for item in gaps if isinstance(item, dict)):
+        gaps.append({"factor": factor, "description": description, "evidence": [], "severity": "major"})
+
+
+def _apply_location_and_work_rights_guard(
+    artist_dna: dict[str, Any], opportunity: dict[str, Any], result: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep overseas roles from outranking work the performer can actually take.
+
+    An artist selecting UK and EU work rights has not necessarily stated that a
+    US visa is impossible, so this is a strong cap rather than a false hard
+    rejection. A listing that explicitly offers visa support remains visible,
+    but cannot be presented as an uncomplicated top match.
+    """
+    eligibility = artist_dna.get("eligibility", {}) if isinstance(artist_dna, dict) else {}
+    preferences = artist_dna.get("preferences", {}) if isinstance(artist_dna, dict) else {}
+    rights = _location_regions(eligibility.get("work_rights") if isinstance(eligibility, dict) else [])
+    preferred = _location_regions(
+        (preferences.get("preferred_locations") if isinstance(preferences, dict) else None)
+        or (preferences.get("preferred_countries") if isinstance(preferences, dict) else None)
+    )
+    country = _field_text(opportunity, "location", "country")
+    city = _field_text(opportunity, "location", "city")
+    contract_type = _field_text(opportunity, "contract_and_compensation", "contract_type").lower()
+    opportunity_regions = _location_regions(f"{city} {country}")
+    if not opportunity_regions or "worldwide" in opportunity_regions or "cruise" in contract_type:
+        return result
+
+    overall = result.setdefault("overall", {})
+    stated_visa_support = _has_stated_visa_support(opportunity)
+    outside_confirmed_rights = bool(rights and "worldwide" not in rights and not (rights & opportunity_regions))
+    outside_preferences = bool(preferred and "worldwide" not in preferred and not (preferred & opportunity_regions))
+
+    if outside_confirmed_rights:
+        cap = 70 if stated_visa_support else 40
+        if int(overall.get("match_score", 0) or 0) > cap:
+            overall["match_score"] = cap
+        overall["match_level"] = "moderate" if stated_visa_support else "weak"
+        overall["recommendation"] = "possible_match" if stated_visa_support else "weak_match"
+        place = country or city or "this location"
+        if stated_visa_support:
+            message = f"This role is outside your confirmed work-rights regions, but the listing states visa or work-permit support."
+        else:
+            message = f"This role is in {place}, outside your confirmed work-rights regions, and the listing does not state visa support."
+        overall["summary"] = message
+        match_eligibility = result.setdefault("eligibility", {})
+        match_eligibility["status"] = "possible_issue"
+        match_eligibility["work_rights"] = {"status": "possible_issue", "evidence": [message]}
+        _add_gap(result, factor="Work rights and visa", description=message)
+        return result
+
+    if outside_preferences:
+        cap = 70
+        if int(overall.get("match_score", 0) or 0) > cap:
+            overall["match_score"] = cap
+        overall["match_level"] = "moderate"
+        overall["recommendation"] = "possible_match"
+        place = country or city or "this location"
+        message = f"This role is outside your preferred work locations ({place}), so it is ranked below comparable local opportunities."
+        _add_gap(result, factor="Preferred work location", description=message)
+    return result
+
+
 def _calibrate_evidence_score(result: dict[str, Any]) -> dict[str, Any]:
     """Resolve coarse model score ties using the structured evidence it gave.
 
@@ -854,7 +971,8 @@ def match_artist_to_opportunity(
     try:
         calibrated = _calibrate_evidence_score(json.loads(response.output_text))
         guarded = _apply_requirement_guards(artist_dna, opportunity, calibrated)
-        return _apply_gender_requirement_guard(artist_dna, opportunity, guarded)
+        guarded = _apply_gender_requirement_guard(artist_dna, opportunity, guarded)
+        return _apply_location_and_work_rights_guard(artist_dna, opportunity, guarded)
 
     except json.JSONDecodeError as error:
         raise MatchEngineError(

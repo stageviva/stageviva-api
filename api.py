@@ -32,6 +32,7 @@ from artist_intelligence import analyse_artist, enrich_artist_dna
 from cv_headshot import extract_cv_headshot
 from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
+from match_engine import _apply_location_and_work_rights_guard
 from match_service import match_artist_to_opportunity
 from native_push_notifications import (
     NativePushConfigurationError,
@@ -455,6 +456,9 @@ async def lifespan(_: FastAPI):
         hidden = _hide_non_actionable_opportunities(storage)
         if hidden:
             logger.info("Hidden %s existing opportunities that no longer meet the live-feed standard", hidden)
+        duplicates = storage.hide_duplicate_opportunities()
+        if duplicates:
+            logger.info("Hidden %s duplicate opportunities from the live feed", duplicates)
         pending_users = storage.list_processing_cv_analyses()
         artists_to_refresh = storage.list_registered_artists() if seeded else []
     finally:
@@ -848,6 +852,22 @@ def _is_actionable_match(match: dict[str, Any]) -> bool:
     return dates.get("status") != "conflict"
 
 
+def _apply_current_location_guards(
+    user: dict[str, Any], storage: StageVivaStorage, matches: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply deterministic eligibility caps to matches generated before this release."""
+    artist = storage.get_artist_for_user(user["id"])
+    if not artist:
+        return matches
+    for item in matches:
+        original = json.dumps(item["match"], ensure_ascii=False, sort_keys=True)
+        guarded = _apply_location_and_work_rights_guard(artist["dna"], item["opportunity"], item["match"])
+        item["match"] = guarded
+        if json.dumps(guarded, ensure_ascii=False, sort_keys=True) != original:
+            storage.upsert_match(artist["id"], item["opportunity_id"], guarded)
+    return matches
+
+
 def _hide_non_actionable_opportunities(storage: Storage) -> int:
     """Move legacy entries failing today's publication rules to Content Review.
 
@@ -884,6 +904,9 @@ def _run_daily_source_scan() -> None:
         storage = StageVivaStorage(DATABASE_PATH)
         try:
             result = run_daily_pipeline(storage, limit_per_source=max(1, limit))
+            duplicates = storage.hide_duplicate_opportunities()
+            if duplicates:
+                logger.info("Hidden %s duplicate opportunities after source scan", duplicates)
             logger.info("Daily source scan completed: %s", result)
             if os.getenv("RESEND_API_KEY") and os.getenv("RESEND_FROM_EMAIL"):
                 from email_notifications import deliver_pending_emails
@@ -1292,8 +1315,9 @@ def list_matches(
     selected_categories = {
         value.strip().lower() for value in (categories or "").split(",") if value.strip()
     }
+    matches = _apply_current_location_guards(user, storage, storage.list_matches_for_user(user["id"]))
     matches = [
-        item for item in storage.list_matches_for_user(user["id"])
+        item for item in matches
         if (_is_actionable_match(item["match"])
             and is_stageviva_eligible(item["opportunity"])
             and is_current_opportunity(item["opportunity"])
@@ -1308,8 +1332,9 @@ def list_matches(
 def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, Any]]:
     # Keep this compatibility endpoint presentation-ready as well. The mobile
     # app may use it while the main match feed is loading.
+    matches = _apply_current_location_guards(user, storage, storage.list_matches_for_user(user["id"]))
     matches = [
-        item for item in storage.list_matches_for_user(user["id"])
+        item for item in matches
         if (_is_actionable_match(item["match"])
             and is_stageviva_eligible(item["opportunity"])
             and is_current_opportunity(item["opportunity"])
@@ -1321,7 +1346,7 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
 @app.get("/opportunities/{opportunity_id}")
 def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) -> dict[str, Any]:
     """Return a clean detail screen for one recommendation."""
-    all_matches = storage.list_matches_for_user(user["id"])
+    all_matches = _apply_current_location_guards(user, storage, storage.list_matches_for_user(user["id"]))
     released = _released_match_ids(user, storage, all_matches)
     for item in all_matches:
         if (item["opportunity_id"] == opportunity_id and _is_actionable_match(item["match"])
