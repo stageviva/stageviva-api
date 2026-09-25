@@ -494,6 +494,24 @@ class StageVivaStorage:
         self.connection.commit()
         return self.get_user(user_id)
 
+    def delete_user_account(self, user_id: str) -> dict[str, Any] | None:
+        """Permanently remove one account and its active StageViva data."""
+        user = self.get_user(user_id)
+        if not user:
+            return None
+        artist_id = str(user.get("artist_id") or "")
+        self.connection.execute("DELETE FROM cv_analysis_jobs WHERE user_id = ?", (user_id,))
+        self.connection.execute("DELETE FROM cv_upload_events WHERE user_id = ?", (user_id,))
+        self.connection.execute("DELETE FROM weekly_match_releases WHERE user_id = ?", (user_id,))
+        self.connection.execute("DELETE FROM push_subscriptions WHERE user_id = ?", (user_id,))
+        if artist_id:
+            self.connection.execute("DELETE FROM notification_outbox WHERE artist_id = ?", (artist_id,))
+            self.connection.execute("DELETE FROM match_results WHERE artist_id = ?", (artist_id,))
+            self.connection.execute("DELETE FROM artists WHERE id = ?", (artist_id,))
+        self.connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self.connection.commit()
+        return {"id": user_id, "email": user["email"], "artist_id": artist_id}
+
     def list_performers_for_admin(self) -> list[dict[str, Any]]:
         """Return the creator's private profile overview without account secrets or CV files."""
         rows = self.connection.execute("""

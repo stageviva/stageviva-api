@@ -8,6 +8,7 @@ import hmac
 import logging
 import json
 import mimetypes
+import shutil
 import threading
 import time
 from datetime import date, datetime
@@ -423,6 +424,16 @@ def _is_admin_user(user: dict[str, Any]) -> bool:
     return _is_owner_email(user["email"]) or _membership_tier(user) == "admin"
 
 
+def _delete_private_uploads(user_id: str) -> None:
+    """Delete only the known user's upload folder, never a broader path."""
+    root = UPLOADS_DIR.resolve()
+    target = (root / user_id).resolve()
+    if target.parent != root:
+        raise RuntimeError("Refusing an unsafe account-data deletion path.")
+    if target.is_dir():
+        shutil.rmtree(target)
+
+
 def require_admin(user: CurrentUser) -> dict[str, Any]:
     """Restrict moderation to the founder and approved admin collaborators."""
     if not _is_admin_user(user):
@@ -626,6 +637,21 @@ def update_profile(payload: ProfileRequest, user: CurrentUser, storage: Storage)
             updated_dna = _deep_merge(artist["dna"], {"identity": {"gender": gender}})
             _store_and_match_artist(user["id"], updated_dna, storage)
     return _public_user(saved_user)
+
+
+@app.delete("/me/account")
+def delete_my_account(user: CurrentUser, storage: Storage) -> dict[str, bool]:
+    """Let a performer permanently remove their own active account data."""
+    try:
+        _delete_private_uploads(user["id"])
+    except OSError as error:
+        logger.exception("Could not remove uploads for account deletion")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Your account could not be deleted yet. Please try again.") from error
+    deleted = storage.delete_user_account(user["id"])
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+    return {"ok": True}
 
 
 @app.get("/me/artist-dna")
@@ -1461,6 +1487,30 @@ def admin_update_performer_membership(
         "id": updated["id"], "email": updated["email"], "display_name": updated["display_name"],
         "membership_tier": _membership_tier(updated), "access": _access_for_user(updated),
     }
+
+
+@app.delete("/admin/performers/{user_id}")
+def admin_delete_performer(
+    user_id: str, admin: AdminUser, storage: Storage,
+) -> dict[str, bool]:
+    """Allow approved administrators to remove a violating performer account."""
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Use your own account settings to delete your account.")
+    target = storage.get_user(user_id)
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Performer not found.")
+    if _is_owner_email(target["email"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="The founder account cannot be deleted by an administrator.")
+    try:
+        _delete_private_uploads(user_id)
+    except OSError as error:
+        logger.exception("Could not remove uploads for administrator account deletion")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="This account could not be deleted yet. Please try again.") from error
+    storage.delete_user_account(user_id)
+    return {"ok": True}
 
 
 @app.patch("/admin/opportunities/{opportunity_id}")
