@@ -224,6 +224,22 @@ def _access_for_user(user: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _cv_upload_limit_for_user(user: dict[str, Any]) -> int:
+    """Basic users get two fresh CV analyses monthly; paid access gets five."""
+    return 2 if _membership_tier(user) == "free" else 5
+
+
+def _cv_upload_allowance(user: dict[str, Any], storage: StageVivaStorage) -> dict[str, int | bool]:
+    limit = _cv_upload_limit_for_user(user)
+    used = storage.cv_upload_count_this_month(user["id"])
+    return {
+        "used": used,
+        "limit": limit,
+        "remaining": max(0, limit - used),
+        "can_upload": used < limit,
+    }
+
+
 def _create_token(user_id: str, storage: StageVivaStorage) -> str:
     import time
     return jwt.encode(
@@ -461,9 +477,18 @@ def me(user: CurrentUser) -> dict[str, Any]:
 
 
 @app.get("/me/access")
-def get_my_access(user: CurrentUser) -> dict[str, Any]:
+def get_my_access(user: CurrentUser, storage: Storage) -> dict[str, Any]:
     """Return feature access without exposing billing-provider implementation details."""
-    return _access_for_user(user)
+    access = _access_for_user(user)
+    allowance = _cv_upload_allowance(user, storage)
+    # The nested object is convenient for new clients; the flat names retain a
+    # stable, simple contract for existing mobile and web builds.
+    access["cv_uploads"] = allowance
+    access["cv_uploads_used_this_month"] = allowance["used"]
+    access["cv_uploads_limit"] = allowance["limit"]
+    access["cv_uploads_remaining"] = allowance["remaining"]
+    access["can_upload_cv"] = allowance["can_upload"]
+    return access
 
 
 def _require_premium_access(user: dict[str, Any]) -> None:
@@ -1134,7 +1159,13 @@ async def upload_cv(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CV must be between 1 byte and 10 MB.")
     # Keep an upload history for support and diagnostics, but never cap a
     # performer: a corrected or newer CV should always be analysable.
-    storage.reserve_cv_upload(user["id"])
+    limit = _cv_upload_limit_for_user(user)
+    reserved, used = storage.reserve_cv_upload_this_month(user["id"], limit)
+    if not reserved:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"You've used {used} of {limit} CV uploads this month. Your allowance resets next month.",
+        )
     user_directory = UPLOADS_DIR / user["id"]
     user_directory.mkdir(parents=True, exist_ok=True)
     cv_path = user_directory / f"cv{suffix}"
@@ -1146,7 +1177,8 @@ async def upload_cv(
     background_tasks.add_task(_analyse_uploaded_cv_in_background, user["id"], str(cv_path))
     return {
         "status": job["status"], "started_at": job["started_at"],
-        "uploads_used": storage.cv_upload_count(user["id"]),
+        "uploads_used": used,
+        "cv_uploads": _cv_upload_allowance(user, storage),
     }
 
 
@@ -1155,9 +1187,14 @@ def get_cv_analysis(user: CurrentUser, storage: Storage) -> dict[str, Any]:
     """Polling endpoint for the setup screen; never keeps a browser request open."""
     job = storage.get_cv_analysis(user["id"])
     if not job:
-        return {"status": "not_started", "uploads_used": storage.cv_upload_count(user["id"])}
+        return {
+            "status": "not_started",
+            "uploads_used": storage.cv_upload_count_this_month(user["id"]),
+            "cv_uploads": _cv_upload_allowance(user, storage),
+        }
     response: dict[str, Any] = dict(job)
-    response["uploads_used"] = storage.cv_upload_count(user["id"])
+    response["uploads_used"] = storage.cv_upload_count_this_month(user["id"])
+    response["cv_uploads"] = _cv_upload_allowance(user, storage)
     if job["status"] == "complete":
         artist = storage.get_artist_for_user(user["id"])
         response["artist_dna"] = _artist_dna_with_profile_questions(artist["dna"]) if artist else None

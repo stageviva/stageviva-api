@@ -419,6 +419,41 @@ class StageVivaStorage:
             "SELECT COUNT(*) FROM cv_upload_events WHERE user_id = ?", (user_id,),
         ).fetchone()[0])
 
+    def cv_upload_count_this_month(self, user_id: str) -> int:
+        """Return CV analyses started since the current UTC calendar month began."""
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        return int(self.connection.execute(
+            "SELECT COUNT(*) FROM cv_upload_events WHERE user_id = ? AND created_at >= ?",
+            (user_id, month_start),
+        ).fetchone()[0])
+
+    def reserve_cv_upload_this_month(self, user_id: str, limit: int) -> tuple[bool, int]:
+        """Atomically reserve one monthly CV upload without ever exceeding its allowance."""
+        if limit < 1:
+            raise ValueError("CV upload allowance must be positive.")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            now = datetime.now(timezone.utc)
+            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+            used = int(self.connection.execute(
+                "SELECT COUNT(*) FROM cv_upload_events WHERE user_id = ? AND created_at >= ?",
+                (user_id, month_start),
+            ).fetchone()[0])
+            if used >= limit:
+                self.connection.rollback()
+                return False, used
+            created_at = now.replace(microsecond=0).isoformat()
+            self.connection.execute(
+                "INSERT INTO cv_upload_events (id, user_id, created_at) VALUES (?, ?, ?)",
+                (_stable_id("cv_upload", f"{user_id}:{created_at}:{uuid.uuid4().hex}"), user_id, created_at),
+            )
+            self.connection.commit()
+            return True, used + 1
+        except Exception:
+            self.connection.rollback()
+            raise
+
     def reserve_cv_upload(self, user_id: str) -> bool:
         """Record a CV analysis while allowing performers to update freely."""
         self.connection.execute("BEGIN IMMEDIATE")
