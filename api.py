@@ -240,6 +240,70 @@ def _cv_upload_allowance(user: dict[str, Any], storage: StageVivaStorage) -> dic
     }
 
 
+def _is_immediate_access_user(user: dict[str, Any]) -> bool:
+    return _membership_tier(user) != "free"
+
+
+def _weekly_release_start() -> str:
+    today = date.today()
+    return (today.fromordinal(today.toordinal() - today.weekday())).isoformat()
+
+
+def _released_match_ids(user: dict[str, Any], storage: StageVivaStorage, matches: list[dict[str, Any]]) -> set[str]:
+    if _is_immediate_access_user(user):
+        return {str(item["opportunity_id"]) for item in matches}
+    return storage.weekly_released_match_ids(
+        user["id"], _weekly_release_start(), [str(item["opportunity_id"]) for item in matches],
+    )
+
+
+def _locked_match_payload(item: dict[str, Any]) -> dict[str, Any]:
+    """Do not send Premium title, company, place, deadline or score to Basic accounts."""
+    return {
+        "opportunity_id": item["opportunity_id"],
+        "updated_at": item["updated_at"],
+        "locked": True,
+        "card": {
+            "title": "Premium opportunity",
+            "role_summary": "Full role details are available with Premium",
+            "deadline": "",
+            "location": "",
+            "match_score": None,
+            "match_level": "locked",
+            "track": "",
+            "categories": [],
+        },
+    }
+
+
+def _present_matches_for_user(
+    user: dict[str, Any], storage: StageVivaStorage, matches: list[dict[str, Any]],
+    *, track: str | None, categories: set[str],
+) -> list[dict[str, Any]]:
+    released = _released_match_ids(user, storage, matches)
+    presented = matches_for_filters(matches, track=track, categories=categories)
+    if _is_immediate_access_user(user):
+        return presented
+    return [
+        item if str(item["opportunity_id"]) in released else _locked_match_payload(item)
+        for item in presented
+    ]
+
+
+def _generic_basic_notification(item: dict[str, Any]) -> dict[str, Any]:
+    score = item.get("match", {}).get("overall", {}).get("match_score", "New")
+    return {
+        "id": item["id"],
+        "status": item["status"],
+        "created_at": item["created_at"],
+        "read_at": item.get("read_at"),
+        "opportunity_id": item["opportunity_id"],
+        "title": f"An opportunity matches you at {score}%",
+        "opportunity_title": "",
+        "locked": True,
+    }
+
+
 def _create_token(user_id: str, storage: StageVivaStorage) -> str:
     import time
     return jwt.encode(
@@ -1235,8 +1299,8 @@ def list_matches(
             and is_current_opportunity(item["opportunity"])
             and has_verified_official_application_url(item["opportunity"], item["listing_url"]))
     ]
-    return matches_for_filters(
-        matches, track=track, categories=selected_categories,
+    return _present_matches_for_user(
+        user, storage, matches, track=track, categories=selected_categories,
     )
 
 
@@ -1251,17 +1315,24 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
             and is_current_opportunity(item["opportunity"])
             and has_verified_official_application_url(item["opportunity"], item["listing_url"]))
     ]
-    return matches_for_filters(matches, track=None, categories=set())
+    return _present_matches_for_user(user, storage, matches, track=None, categories=set())
 
 
 @app.get("/opportunities/{opportunity_id}")
 def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) -> dict[str, Any]:
     """Return a clean detail screen for one recommendation."""
-    for item in storage.list_matches_for_user(user["id"]):
+    all_matches = storage.list_matches_for_user(user["id"])
+    released = _released_match_ids(user, storage, all_matches)
+    for item in all_matches:
         if (item["opportunity_id"] == opportunity_id and _is_actionable_match(item["match"])
                 and is_stageviva_eligible(item["opportunity"])
                 and is_current_opportunity(item["opportunity"])
                 and has_verified_official_application_url(item["opportunity"], item["listing_url"])):
+            if not _is_immediate_access_user(user) and opportunity_id not in released:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This Premium match unlocks with Premium or on your next Monday release.",
+                )
             return opportunity_detail(item)
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
 
@@ -1471,10 +1542,13 @@ def admin_add_opportunity(
 
 @app.get("/notifications")
 def list_notifications(user: CurrentUser, storage: Storage) -> list[dict[str, Any]]:
-    return [
+    notifications = [
         item for item in storage.list_notifications_for_user(user["id"])
         if _is_actionable_match(item["match"])
     ]
+    if _is_immediate_access_user(user):
+        return notifications
+    return [_generic_basic_notification(item) for item in notifications]
 
 
 @app.post("/notifications/{notification_id}/read")

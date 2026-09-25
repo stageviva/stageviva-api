@@ -94,6 +94,11 @@ class StageVivaStorage:
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS weekly_match_releases (
+                user_id TEXT NOT NULL, week_start TEXT NOT NULL,
+                opportunity_ids_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, week_start)
+            );
             CREATE TABLE IF NOT EXISTS push_subscriptions (
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL, endpoint TEXT NOT NULL UNIQUE,
                 subscription_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -538,6 +543,28 @@ class StageVivaStorage:
         )
         return matches
 
+    def weekly_released_match_ids(
+        self, user_id: str, week_start: str, candidate_ids: list[str], *, limit: int = 3,
+    ) -> set[str]:
+        """Freeze a Basic member's three weekly matches on their first visit that week."""
+        row = self.connection.execute("""
+            SELECT opportunity_ids_json FROM weekly_match_releases
+            WHERE user_id = ? AND week_start = ?
+        """, (user_id, week_start)).fetchone()
+        if row:
+            return {str(value) for value in json.loads(row["opportunity_ids_json"])}
+        ids = list(dict.fromkeys(candidate_ids))[:limit]
+        self.connection.execute("""
+            INSERT OR IGNORE INTO weekly_match_releases
+            (user_id, week_start, opportunity_ids_json, created_at) VALUES (?, ?, ?, ?)
+        """, (user_id, week_start, json.dumps(ids), _utc_now()))
+        self.connection.commit()
+        stored = self.connection.execute("""
+            SELECT opportunity_ids_json FROM weekly_match_releases
+            WHERE user_id = ? AND week_start = ?
+        """, (user_id, week_start)).fetchone()
+        return {str(value) for value in json.loads(stored["opportunity_ids_json"])} if stored else set(ids)
+
     def list_notifications_for_user(self, user_id: str) -> list[dict[str, Any]]:
         preferences = self.connection.execute(
             "SELECT in_app_notifications FROM users WHERE id = ?", (user_id,),
@@ -646,7 +673,7 @@ class StageVivaStorage:
     def pending_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.connection.execute("""
             SELECT notification_outbox.id AS notification_id, notification_outbox.match_json,
-                   opportunities.id AS opportunity_id, opportunities.title,
+                   opportunities.id AS opportunity_id, opportunities.title, users.membership_tier,
                    push_subscriptions.id AS subscription_id, push_subscriptions.endpoint,
                    push_subscriptions.subscription_json
             FROM notification_outbox
@@ -666,7 +693,7 @@ class StageVivaStorage:
     def pending_native_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.connection.execute("""
             SELECT notification_outbox.id AS notification_id, notification_outbox.match_json,
-                   opportunities.title, native_push_tokens.id AS token_id,
+                   opportunities.title, users.membership_tier, native_push_tokens.id AS token_id,
                    native_push_tokens.token, native_push_tokens.platform
             FROM notification_outbox
             JOIN users ON users.artist_id = notification_outbox.artist_id

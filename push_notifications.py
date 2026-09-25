@@ -20,9 +20,10 @@ def deliver_pending_push_notifications(storage: StageVivaStorage, *, limit: int 
     failures: list[str] = []
     for item in pending:
         score = item["match"].get("overall", {}).get("match_score", "New")
+        is_basic = str(item.get("membership_tier") or "").lower() == "free"
         payload = {
             "title": "New StageViva match",
-            "body": f"{item['title']} — {score}% match",
+            "body": f"An opportunity matches you at {score}%" if is_basic else f"{item['title']} — {score}% match",
             "url": "/matches",
             "tag": item["notification_id"],
         }

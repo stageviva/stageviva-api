@@ -69,11 +69,14 @@ def _send_apns(token: str, payload: dict[str, Any]) -> tuple[bool, str | None]:
     return False, f"{response.status_code}:{reason}"
 
 
-def _match_payload(title: str, match: dict[str, Any]) -> dict[str, Any]:
+def _match_payload(title: str, match: dict[str, Any], *, is_basic: bool = False) -> dict[str, Any]:
     score = match.get("overall", {}).get("match_score", "New")
     return {
         "aps": {
-            "alert": {"title": "New StageViva match", "body": f"{title} — {score}% match"},
+            "alert": {
+                "title": "New StageViva match",
+                "body": f"An opportunity matches you at {score}%" if is_basic else f"{title} — {score}% match",
+            },
             "sound": "default",
         },
         "stageviva_path": "/matches",
@@ -97,7 +100,12 @@ def deliver_pending_native_push_notifications(storage: StageVivaStorage, *, limi
         if item["platform"] != "ios":
             continue
         try:
-            delivered, reason = _send_apns(item["token"], _match_payload(item["title"], item["match"]))
+            delivered, reason = _send_apns(
+                item["token"], _match_payload(
+                    item["title"], item["match"],
+                    is_basic=str(item.get("membership_tier") or "").lower() == "free",
+                ),
+            )
         except Exception as error:
             failures.append(f"{item['token_id']}: {error}")
             continue
