@@ -509,7 +509,7 @@ origins = [origin.strip() for origin in os.getenv(
 ).split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware, allow_origins=origins, allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     # Lovable Cloud adds its Supabase client-identification headers to browser
     # requests.  They are harmless here (authentication still depends on the
     # verified bearer JWT), but CORS must allow them before a CV reaches us.
