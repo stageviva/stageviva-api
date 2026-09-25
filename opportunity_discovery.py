@@ -395,6 +395,65 @@ def discover_allcasting() -> List[DiscoveredOpportunity]:
 
 
 # ============================================================
+# OFFICIAL ONGOING CASTING / REPRESENTATION PAGES
+# ============================================================
+
+def _discover_official_opportunity_page(
+    name: str, url: str, category: str, title: str,
+) -> List[DiscoveredOpportunity]:
+    """Represent a verified official casting page as one live source.
+
+    Some employers publish rolling casting on a single page rather than a new
+    URL for every role. The page itself is the official application route, so
+    preserving its readable text lets Opportunity Intelligence decide whether
+    it currently represents a real eligible opportunity.
+    """
+    source = DiscoverySource(name, url, category, 1)
+    print(f"\n[DISCOVERY] {source.name}")
+    html = fetch_page(source.url)
+    if not html:
+        return []
+    description = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    if len(description) < 80:
+        return []
+    return [DiscoveredOpportunity(
+        title=title,
+        listing_url=source.url,
+        source_name=source.name,
+        source_url=source.url,
+        category=source.category,
+        description=description[:16000],
+    )]
+
+
+def discover_celebrity_cruises() -> List[DiscoveredOpportunity]:
+    return _discover_official_opportunity_page(
+        "Celebrity Cruises Entertainment",
+        "https://www.celebritycruisesentertainment.com/online-submissions",
+        "cruise_entertainment",
+        "Celebrity Cruises Entertainment — performer casting",
+    )
+
+
+def discover_aida_casting() -> List[DiscoveredOpportunity]:
+    return _discover_official_opportunity_page(
+        "AIDA Casting",
+        "https://aida.de/careers/de/casting",
+        "cruise_entertainment",
+        "AIDA Cruises Entertainment — performer casting",
+    )
+
+
+def discover_taylor_made_global() -> List[DiscoveredOpportunity]:
+    return _discover_official_opportunity_page(
+        "Taylor Made Global",
+        "https://www.taylormadeents.com/management",
+        "agency",
+        "Taylor Made Global — performer representation",
+    )
+
+
+# ============================================================
 # MAIN DISCOVERY PIPELINE
 # ============================================================
 

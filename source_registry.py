@@ -150,9 +150,30 @@ SOURCES: List[Source] = [
 
     # Entertainers Worldwide and Backstage already cover
     # many cruise opportunities.
-    #
-    # We can add more cruise-specific discovery sources
-    # once their public listing structure has been tested.
+    Source(
+        name="Celebrity Cruises Entertainment",
+        url="https://www.celebritycruisesentertainment.com/online-submissions",
+        category="cruise_entertainment",
+        priority=1,
+        automation_ready=True,
+    ),
+    Source(
+        name="AIDA Casting",
+        url="https://aida.de/careers/de/casting",
+        category="cruise_entertainment",
+        priority=1,
+        automation_ready=True,
+    ),
+
+    # Taylor Made is an agency/representation route. It belongs in the Agency
+    # filter rather than being presented as a particular paid contract.
+    Source(
+        name="Taylor Made Global",
+        url="https://www.taylormadeents.com/management",
+        category="agency",
+        priority=1,
+        automation_ready=True,
+    ),
 
 
     # ========================================================

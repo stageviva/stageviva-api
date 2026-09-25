@@ -18,9 +18,12 @@ from opportunity_discovery import (
     discover_balletplaces,
     discover_ballee,
     discover_allcasting,
+    discover_aida_casting,
     discover_dance_europe,
     discover_entertainers_worldwide,
+    discover_celebrity_cruises,
     discover_from_source,
+    discover_taylor_made_global,
 )
 from opportunity_intelligence import DiscoveryContext, analyse_opportunity
 from opportunity_lifecycle import is_current_opportunity
@@ -71,6 +74,12 @@ def discover_for_source(source: Source) -> list[DiscoveredOpportunity]:
         return discover_entertainers_worldwide()
     if source.name == "AllCasting":
         return discover_allcasting()
+    if source.name == "Celebrity Cruises Entertainment":
+        return discover_celebrity_cruises()
+    if source.name == "AIDA Casting":
+        return discover_aida_casting()
+    if source.name == "Taylor Made Global":
+        return discover_taylor_made_global()
     return discover_from_source(source)
 
 

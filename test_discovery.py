@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from opportunity_discovery import discover_allcasting, discover_ballee, discover_dance_europe, discover_entertainers_worldwide
+from opportunity_discovery import (
+    discover_aida_casting, discover_allcasting, discover_ballee,
+    discover_celebrity_cruises, discover_dance_europe,
+    discover_entertainers_worldwide, discover_taylor_made_global,
+)
 
 
 PAGE = """
@@ -59,6 +63,20 @@ class AllCastingDiscoveryTest(unittest.TestCase):
         opportunities = discover_allcasting()
         self.assertEqual(len(opportunities), 1)
         self.assertEqual(opportunities[0].listing_url, "https://allcasting.com/castingcall/318716")
+
+
+class OfficialCastingPageDiscoveryTest(unittest.TestCase):
+    @patch("opportunity_discovery.fetch_page", return_value=(
+        "<main>Current dancer casting and online submission details for professional performers "
+        "including requirements, audition preparation and application instructions.</main>"
+    ))
+    def test_keeps_official_rolling_casting_pages_as_one_candidate(self, _fetch) -> None:
+        celebrity = discover_celebrity_cruises()
+        aida = discover_aida_casting()
+        agency = discover_taylor_made_global()
+        self.assertEqual(celebrity[0].listing_url, "https://www.celebritycruisesentertainment.com/online-submissions")
+        self.assertEqual(aida[0].source_name, "AIDA Casting")
+        self.assertEqual(agency[0].category, "agency")
 
 
 if __name__ == "__main__":
