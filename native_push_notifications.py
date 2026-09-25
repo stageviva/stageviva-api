@@ -69,7 +69,9 @@ def _send_apns(token: str, payload: dict[str, Any]) -> tuple[bool, str | None]:
     return False, f"{response.status_code}:{reason}"
 
 
-def _match_payload(title: str, match: dict[str, Any], *, is_basic: bool = False) -> dict[str, Any]:
+def _match_payload(
+    title: str, match: dict[str, Any], opportunity_id: str, *, is_basic: bool = False,
+) -> dict[str, Any]:
     score = match.get("overall", {}).get("match_score", "New")
     return {
         "aps": {
@@ -79,7 +81,7 @@ def _match_payload(title: str, match: dict[str, Any], *, is_basic: bool = False)
             },
             "sound": "default",
         },
-        "stageviva_path": "/matches",
+        "stageviva_path": f"/opportunities/{opportunity_id}",
     }
 
 
@@ -102,7 +104,7 @@ def deliver_pending_native_push_notifications(storage: StageVivaStorage, *, limi
         try:
             delivered, reason = _send_apns(
                 item["token"], _match_payload(
-                    item["title"], item["match"],
+                    item["title"], item["match"], str(item["opportunity_id"]),
                     is_basic=str(item.get("membership_tier") or "").lower() == "free",
                 ),
             )

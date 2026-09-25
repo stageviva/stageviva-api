@@ -693,7 +693,7 @@ class StageVivaStorage:
     def pending_native_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.connection.execute("""
             SELECT notification_outbox.id AS notification_id, notification_outbox.match_json,
-                   opportunities.title, users.membership_tier, native_push_tokens.id AS token_id,
+                   opportunities.id AS opportunity_id, opportunities.title, users.membership_tier, native_push_tokens.id AS token_id,
                    native_push_tokens.token, native_push_tokens.platform
             FROM notification_outbox
             JOIN users ON users.artist_id = notification_outbox.artist_id

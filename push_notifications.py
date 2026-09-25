@@ -24,7 +24,7 @@ def deliver_pending_push_notifications(storage: StageVivaStorage, *, limit: int 
         payload = {
             "title": "New StageViva match",
             "body": f"An opportunity matches you at {score}%" if is_basic else f"{item['title']} — {score}% match",
-            "url": "/matches",
+            "url": f"/opportunities/{item['opportunity_id']}",
             "tag": item["notification_id"],
         }
         try:
