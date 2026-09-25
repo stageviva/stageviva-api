@@ -10,6 +10,10 @@ class Source:
     priority: int = 1
     active: bool = True
     automation_ready: bool = False
+    # A small number of employers maintain one official application page and
+    # update the roles on that page.  Those sources are safe to re-analyse on
+    # later scans; ordinary listing boards remain URL-deduplicated.
+    refresh_existing: bool = False
 
 
 # ============================================================
@@ -156,13 +160,16 @@ SOURCES: List[Source] = [
         category="cruise_entertainment",
         priority=1,
         automation_ready=True,
+        refresh_existing=True,
     ),
     Source(
         name="AIDA Casting",
         url="https://aida.de/careers/de/casting",
         category="cruise_entertainment",
         priority=1,
-        automation_ready=True,
+        # The official site currently denies automated requests, so keep this
+        # visible in the source registry without making every daily run fail.
+        automation_ready=False,
     ),
 
     # Taylor Made is an agency/representation route. It belongs in the Agency

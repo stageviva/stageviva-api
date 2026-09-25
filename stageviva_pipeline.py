@@ -113,7 +113,12 @@ def run_pipeline(
         if limit is not None and analysed >= limit:
             break
 
-        if storage.listing_seen(item.listing_url):
+        existing = storage.opportunity_by_listing_url(item.listing_url)
+        # Major employers sometimes replace the roles and requirements on one
+        # permanent casting page.  Re-read that page on each scan so an
+        # existing URL never freezes its previous information in StageViva.
+        # All ordinary sources still use strict URL deduplication.
+        if storage.listing_seen(item.listing_url) and not source.refresh_existing:
             skipped += 1
             continue
         try:
@@ -123,14 +128,20 @@ def run_pipeline(
                 else analyse(item.listing_url, _discovery_context(item))
             )
             if not is_current_opportunity(opportunity):
+                if existing:
+                    storage.hide_opportunity(existing["id"])
                 storage.reject_listing(item.listing_url, item.source_name, "expired")
                 skipped_expired += 1
                 continue
             if not is_stageviva_eligible(opportunity):
+                if existing:
+                    storage.hide_opportunity(existing["id"])
                 storage.reject_listing(item.listing_url, item.source_name, "education_or_training")
                 skipped_ineligible += 1
                 continue
             if not has_verified_official_application_url(opportunity, item.listing_url):
+                if existing:
+                    storage.hide_opportunity(existing["id"])
                 storage.reject_listing(item.listing_url, item.source_name, "official_link_unverified")
                 skipped_ineligible += 1
                 continue

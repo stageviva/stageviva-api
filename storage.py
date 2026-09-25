@@ -153,6 +153,19 @@ class StageVivaStorage:
             "SELECT 1 FROM rejected_listings WHERE listing_url = ?", (listing_url,),
         ).fetchone() is not None
 
+    def opportunity_by_listing_url(self, listing_url: str) -> dict[str, Any] | None:
+        """Return an existing catalogue row for a rolling official listing."""
+        row = self.connection.execute("""
+            SELECT id, visible, opportunity_json FROM opportunities WHERE listing_url = ?
+        """, (listing_url,)).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row["id"]),
+            "visible": bool(row["visible"]),
+            "opportunity": json.loads(row["opportunity_json"]),
+        }
+
     def reject_listing(self, listing_url: str, source_name: str, reason: str) -> None:
         self.connection.execute("""
             INSERT OR IGNORE INTO rejected_listings (listing_url, source_name, reason, rejected_at)
