@@ -26,7 +26,14 @@ def run_daily_pipeline(
     for source in selected_sources:
         started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         try:
-            result = runner(source, None, storage, limit=limit_per_source)
+            source_limit = limit_per_source
+            if source.per_run_limit is not None:
+                source_limit = (
+                    source.per_run_limit
+                    if source_limit is None
+                    else min(source_limit, source.per_run_limit)
+                )
+            result = runner(source, None, storage, limit=source_limit)
             result_data = asdict(result)
             storage.record_source_run(source.name, started_at, result_data)
             runs.append({"source": source.name, "status": "completed", "result": result_data})

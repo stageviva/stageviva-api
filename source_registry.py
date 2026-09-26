@@ -18,6 +18,10 @@ class Source:
     # is kept separately so the public source URL remains useful to humans.
     source_type: str = "web"
     instagram_handle: str = ""
+    # A newly connected social source can expose a large backlog. Keep the
+    # first daily pass deliberately small; URL deduplication advances to the
+    # next unseen post on later runs.
+    per_run_limit: int | None = None
 
 
 # ============================================================
@@ -201,6 +205,7 @@ SOURCES: List[Source] = [
             automation_ready=True,
             source_type="instagram",
             instagram_handle=handle,
+            per_run_limit=1,
         )
         for handle, category in (
             ("audition360", "performing_arts"),

@@ -29,6 +29,25 @@ class DailyPipelineTest(unittest.TestCase):
             finally:
                 storage.close()
 
+    def test_source_limit_can_lower_global_daily_limit(self) -> None:
+        instagram = Source(
+            "Instagram", "https://example.test", "dance",
+            automation_ready=True, per_run_limit=1,
+        )
+        seen_limits: list[int | None] = []
+
+        def runner(_source, _artists, _storage, *, limit):
+            seen_limits.append(limit)
+            return PipelineResult(0, 0, 0, 0, 0, 0, ())
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                run_daily_pipeline(storage, sources=[instagram], runner=runner, limit_per_source=5)
+            finally:
+                storage.close()
+        self.assertEqual(seen_limits, [1])
+
 
 if __name__ == "__main__":
     unittest.main()
