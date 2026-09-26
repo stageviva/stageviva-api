@@ -884,7 +884,21 @@ def analyse_opportunity(
 
     try:
         opportunity = json.loads(response.output_text)
-        _set_extracted_official_url(opportunity, extract_official_application_url(page_html, url))
+        official_url = extract_official_application_url(page_html, url)
+        # An Instagram API import supplies its caption directly rather than
+        # HTML.  Preserve an explicitly posted external application link, but
+        # never treat the Instagram permalink itself as the application page.
+        if not official_url and listing_text:
+            candidates = re.findall(r"https?://[^\s<>()]+", listing_text)
+            official_url = next(
+                (
+                    candidate.rstrip(".,;:!?)\\]")
+                    for candidate in candidates
+                    if "instagram.com" not in candidate.lower()
+                ),
+                "",
+            )
+        _set_extracted_official_url(opportunity, official_url)
         return opportunity
 
     except json.JSONDecodeError as error:

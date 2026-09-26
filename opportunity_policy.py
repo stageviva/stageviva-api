@@ -9,6 +9,9 @@ from urllib.parse import urlparse
 DIRECTORY_DOMAINS = frozenset({
     "balletplaces.com", "danceeurope.net", "ballee.co",
     "entertainersworldwidejobs.com", "allcasting.com",
+    # Instagram posts are discovery evidence. A caption must contain a real
+    # public application destination before it can be shown to performers.
+    "instagram.com", "l.instagram.com",
 })
 
 

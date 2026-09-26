@@ -25,6 +25,7 @@ from opportunity_discovery import (
     discover_from_source,
     discover_taylor_made_global,
 )
+from instagram_discovery import discover_instagram_source
 from opportunity_intelligence import DiscoveryContext, analyse_opportunity
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
@@ -64,6 +65,8 @@ def _discovery_context(item: DiscoveredOpportunity) -> DiscoveryContext:
 def discover_for_source(source: Source) -> list[DiscoveredOpportunity]:
     """Route a source to its tested adapter, with a generic fallback."""
 
+    if source.source_type == "instagram":
+        return discover_instagram_source(source)
     if source.name == "BalletPlaces":
         return discover_balletplaces()
     if source.name == "Dance Europe":

@@ -14,6 +14,10 @@ class Source:
     # update the roles on that page.  Those sources are safe to re-analyse on
     # later scans; ordinary listing boards remain URL-deduplicated.
     refresh_existing: bool = False
+    # Instagram sources are queried through Meta's official API.  The handle
+    # is kept separately so the public source URL remains useful to humans.
+    source_type: str = "web"
+    instagram_handle: str = ""
 
 
 # ============================================================
@@ -182,6 +186,42 @@ SOURCES: List[Source] = [
         automation_ready=True,
     ),
 
+    # ========================================================
+    # INSTAGRAM DISCOVERY
+    # ========================================================
+    # These accounts are deliberately read through the official Meta API, not
+    # by scraping Instagram pages.  They become automation-ready only when
+    # the StageViva Meta access-token configuration is present.
+    *[
+        Source(
+            name=f"Instagram @{handle}",
+            url=f"https://www.instagram.com/{handle}/",
+            category=category,
+            priority=1,
+            automation_ready=True,
+            source_type="instagram",
+            instagram_handle=handle,
+        )
+        for handle, category in (
+            ("audition360", "performing_arts"),
+            ("audition_company_2026", "ballet_dance"),
+            ("auditionsballet", "ballet_dance"),
+            ("risingstars_talents_job4dancer", "ballet_dance"),
+            ("dancingopportunities", "ballet_dance"),
+            ("balletauditions", "ballet_dance"),
+            ("au_di_tionscom", "performing_arts"),
+            ("audition.dance", "ballet_dance"),
+            ("balletplaces", "ballet_dance"),
+            ("industryauditions", "performing_arts"),
+            ("castingcallsuk_", "acting"),
+            ("aidacasting", "cruise_entertainment"),
+            ("taylormadeglobal", "agency"),
+            ("bubblesanimationentertainment", "performing_arts"),
+            ("starlightpsagency", "agency"),
+            ("celebritycruisesentertainment", "cruise_entertainment"),
+        )
+    ],
+
 
     # ========================================================
     # THEATRE / MUSICAL THEATRE
@@ -255,8 +295,12 @@ def get_sources_by_priority(
 
 def get_automated_sources() -> List[Source]:
     """Return sources with a tested adapter that are safe for daily runs."""
+    # Do not make the daily source scan fail while Meta is being configured.
+    from instagram_discovery import instagram_is_configured
+
     return [
         source
         for source in get_active_sources()
         if source.automation_ready
+        and (source.source_type != "instagram" or instagram_is_configured())
     ]
