@@ -4,6 +4,8 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from instagram_discovery import discover_instagram_source, instagram_is_configured
 from source_registry import Source
 
@@ -44,6 +46,18 @@ class InstagramDiscoveryTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(instagram_is_configured())
             self.assertEqual(discover_instagram_source(SOURCE), [])
+
+    def test_api_failure_never_includes_access_token(self) -> None:
+        response = Mock(status_code=400)
+        response.json.return_value = {"error": {"code": 190, "message": "Invalid OAuth token"}}
+        response.raise_for_status.side_effect = requests.HTTPError(
+            "400 Client Error: Bad Request for url: https://example.test/?access_token=test-token"
+        )
+        with patch("instagram_discovery.requests.get", return_value=response):
+            with self.assertRaises(RuntimeError) as raised:
+                discover_instagram_source(SOURCE)
+        self.assertNotIn("test-token", str(raised.exception))
+        self.assertNotIn("access_token", str(raised.exception))
 
 
 if __name__ == "__main__":

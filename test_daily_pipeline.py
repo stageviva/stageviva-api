@@ -48,6 +48,22 @@ class DailyPipelineTest(unittest.TestCase):
                 storage.close()
         self.assertEqual(seen_limits, [1])
 
+    def test_failure_redacts_an_access_token_before_recording(self) -> None:
+        source = Source("Source", "https://example.test", "dance", automation_ready=True)
+
+        def runner(_source, _artists, _storage, *, limit):
+            raise RuntimeError("request failed: https://example.test/?access_token=secret-value")
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                run_daily_pipeline(storage, sources=[source], runner=runner)
+                run = storage.list_source_runs()[0]
+            finally:
+                storage.close()
+        self.assertNotIn("secret-value", str(run))
+        self.assertIn("[redacted]", str(run))
+
 
 if __name__ == "__main__":
     unittest.main()

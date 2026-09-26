@@ -23,6 +23,17 @@ def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}_{hashlib.sha256(value.encode('utf-8')).hexdigest()[:24]}"
 
 
+def _redact_source_run_value(value: Any) -> Any:
+    """Keep old source-run records from exposing credentials in API responses."""
+    if isinstance(value, str):
+        return re.sub(r"(access_token=)[^&\s]+", r"\1[redacted]", value, flags=re.IGNORECASE)
+    if isinstance(value, list):
+        return [_redact_source_run_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_source_run_value(item) for key, item in value.items()}
+    return value
+
+
 def _document_text(document: dict[str, Any], *path: str) -> str:
     value: Any = document
     for key in path:
@@ -864,7 +875,10 @@ class StageVivaStorage:
         rows = self.connection.execute("""
             SELECT * FROM source_runs ORDER BY rowid DESC LIMIT ?
         """, (limit,)).fetchall()
-        return [{**dict(row), "result": json.loads(row["result_json"])} for row in rows]
+        return [
+            _redact_source_run_value({**dict(row), "result": json.loads(row["result_json"])})
+            for row in rows
+        ]
 
     def upsert_opportunity(self, item: DiscoveredOpportunity, opportunity: dict[str, Any]) -> str:
         opportunity_id = _stable_id("opportunity", item.listing_url.rstrip("/").lower())

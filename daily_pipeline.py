@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Callable, Iterable
@@ -11,6 +12,11 @@ from typing import Callable, Iterable
 from source_registry import Source, get_automated_sources
 from stageviva_pipeline import PipelineResult, run_pipeline
 from storage import StageVivaStorage
+
+
+def _safe_error_message(error: Exception) -> str:
+    """Remove credentials if a dependency includes them in an exception."""
+    return re.sub(r"(access_token=)[^&\s]+", r"\1[redacted]", str(error), flags=re.IGNORECASE)
 
 
 def run_daily_pipeline(
@@ -38,7 +44,7 @@ def run_daily_pipeline(
             storage.record_source_run(source.name, started_at, result_data)
             runs.append({"source": source.name, "status": "completed", "result": result_data})
         except Exception as error:
-            message = str(error)
+            message = _safe_error_message(error)
             result_data = {"discovered": 0, "analysed": 0, "stored_opportunities": 0,
                            "stored_matches": 0, "queued_notifications": 0,
                            "skipped_existing": 0, "skipped_expired": 0, "failures": [message]}

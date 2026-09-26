@@ -51,7 +51,21 @@ def _media_for_handle(handle: str) -> list[dict[str, Any]]:
         params={"fields": fields, "access_token": token},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        # Requests includes the full URL in its default error string.  The URL
+        # contains the access token, so never allow that text into our logs.
+        try:
+            details = response.json().get("error", {})
+            code = details.get("code", response.status_code)
+            message = str(details.get("message") or "Instagram API request failed")
+        except (ValueError, AttributeError):
+            code = response.status_code
+            message = "Instagram API request failed"
+        raise RuntimeError(
+            f"Instagram API rejected @{handle} (code {code}): {message}"
+        ) from error
     payload = response.json()
     discovery = payload.get("business_discovery") or {}
     media = discovery.get("media") or {}
