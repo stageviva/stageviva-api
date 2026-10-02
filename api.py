@@ -79,7 +79,7 @@ logger = logging.getLogger("stageviva.auth")
 SUPPORTED_EXTERNAL_JWT_ALGORITHMS = frozenset({
     "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA",
 })
-MEMBERSHIP_TIERS = frozenset({"admin", "beta", "free", "pro", "school"})
+MEMBERSHIP_TIERS = frozenset({"admin", "free", "pro", "school"})
 source_scan_lock = threading.Lock()
 
 
@@ -142,8 +142,8 @@ class AdminOpportunityUrlRequest(BaseModel):
 
 
 class AdminMembershipUpdateRequest(BaseModel):
-    """Creator-controlled complimentary access during the beta."""
-    membership_tier: str = Field(pattern="^(free|beta|pro|school|admin)$")
+    """Creator-controlled complimentary access for launch support."""
+    membership_tier: str = Field(pattern="^(free|pro|school|admin)$")
 
 
 class ArtistDNARequest(BaseModel):
@@ -192,22 +192,19 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
 
 
 def _membership_tier(user: dict[str, Any]) -> str:
-    tier = str(user.get("membership_tier") or "beta").lower()
+    tier = str(user.get("membership_tier") or "free").lower()
+    # Honour early testers' access without exposing Beta as a public plan.
+    if tier == "beta":
+        return "pro"
     return tier if tier in MEMBERSHIP_TIERS else "free"
 
 
 def _access_for_user(user: dict[str, Any]) -> dict[str, Any]:
-    """One stable contract for the Free/Pro UI and future payment providers.
-
-    Beta is deliberately equivalent to Pro while we validate the product with
-    real performers.  It can be removed without changing the frontend once
-    paid plans are switched on.
-    """
+    """One stable contract for Free and premium access."""
     tier = _membership_tier(user)
-    immediate_access = tier in {"admin", "beta", "pro", "school"}
+    immediate_access = tier in {"admin", "pro", "school"}
     return {
         "membership_tier": tier,
-        "is_beta": tier == "beta",
         "opportunities": {
             "release": "immediate" if immediate_access else "weekly_monday",
             "show_full_details": immediate_access,
@@ -571,7 +568,7 @@ def get_my_access(user: CurrentUser, storage: Storage) -> dict[str, Any]:
 
 
 def _require_premium_access(user: dict[str, Any]) -> None:
-    if _membership_tier(user) not in {"admin", "beta", "pro", "school"}:
+    if _membership_tier(user) not in {"admin", "pro", "school"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This Premium profile insight is not included with Free access.",
@@ -1448,7 +1445,10 @@ def admin_operations(admin: AdminUser, storage: Storage) -> dict[str, Any]:
 @app.get("/admin/performers")
 def admin_list_performers(admin: AdminUser, storage: Storage) -> list[dict[str, Any]]:
     """Private creator overview. It exposes profiles, never passwords or CV files."""
-    return storage.list_performers_for_admin()
+    performers = storage.list_performers_for_admin()
+    for performer in performers:
+        performer["membership_tier"] = _membership_tier(performer)
+    return performers
 
 
 @app.get("/admin/performers/{user_id}/cv")

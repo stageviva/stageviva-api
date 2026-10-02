@@ -106,13 +106,14 @@ def _opportunity_quality(item: dict[str, Any]) -> int:
 
 
 def _new_account_membership_tier() -> str:
-    """Keep early beta invites unlocked without changing existing accounts.
+    """Return the public-launch default, never the retired Beta tier.
 
-    Render can later set STAGEVIVA_DEFAULT_MEMBERSHIP_TIER=free when StageViva
-    launches publicly; an invalid value fails safely to beta during this test.
+    New performers begin on Free.  The optional Render setting lets the owner
+    grant an intentional complimentary plan, but cannot accidentally restore
+    the retired beta default.
     """
-    tier = os.getenv("STAGEVIVA_DEFAULT_MEMBERSHIP_TIER", "beta").strip().lower()
-    return tier if tier in {"free", "beta", "pro", "school"} else "beta"
+    tier = os.getenv("STAGEVIVA_DEFAULT_MEMBERSHIP_TIER", "free").strip().lower()
+    return tier if tier in {"free", "pro", "school"} else "free"
 
 
 class StageVivaStorage:

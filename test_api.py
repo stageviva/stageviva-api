@@ -221,9 +221,9 @@ class ApiTest(unittest.TestCase):
         relocation = next(question for question in questions if question["id"] == "relocation")
         self.assertEqual(relocation["type"], "single_select")
 
-    def test_creator_can_grant_complimentary_beta_premium(self) -> None:
+    def test_creator_can_grant_complimentary_premium(self) -> None:
         owner_token = self.register("owner@example.com", "StageViva Owner")
-        performer_token = self.register("beta@example.com", "Beta Artist")
+        performer_token = self.register("premium@example.com", "Premium Artist")
         performer_headers = {"Authorization": f"Bearer {performer_token}"}
         performer = self.client.get("/me", headers=performer_headers).json()
         self.assertEqual(performer["membership_tier"], "free")
@@ -234,10 +234,10 @@ class ApiTest(unittest.TestCase):
             self.assertIn(performer["email"], [item["email"] for item in overview.json()])
             granted = self.client.patch(
                 f"/admin/performers/{performer['id']}/membership", headers=owner_headers,
-                json={"membership_tier": "beta"},
+                json={"membership_tier": "pro"},
             )
         self.assertEqual(granted.status_code, 200, granted.text)
-        self.assertEqual(granted.json()["membership_tier"], "beta")
+        self.assertEqual(granted.json()["membership_tier"], "pro")
         access = self.client.get("/me/access", headers=performer_headers)
         self.assertEqual(access.json()["opportunities"]["release"], "immediate")
         self.assertTrue(access.json()["opportunities"]["show_full_details"])
@@ -251,7 +251,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(self.client.get("/me/cv-insights", headers=headers).status_code, 403)
         storage = api.StageVivaStorage(api.DATABASE_PATH)
         try:
-            storage.update_membership_tier(self.client.get("/me", headers=headers).json()["id"], "beta")
+            storage.update_membership_tier(self.client.get("/me", headers=headers).json()["id"], "pro")
         finally:
             storage.close()
         response = self.client.get("/me/cv-insights", headers=headers)
