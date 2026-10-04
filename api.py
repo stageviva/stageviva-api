@@ -47,7 +47,6 @@ from opportunity_intelligence import (
     OpportunityFetchError,
     analyse_opportunity,
 )
-from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_presentation import field_value, matches_for_filters, opportunity_detail
 from push_notifications import deliver_pending_push_notifications, public_vapid_key, send_test_push_notification
@@ -461,9 +460,9 @@ async def lifespan(_: FastAPI):
         seeded = seed_catalogue_if_empty(storage)
         if seeded:
             logger.info("Seeded %s validated opportunities for a new database", seeded)
-        hidden = _hide_non_actionable_opportunities(storage)
+        hidden = _hide_expired_opportunities(storage)
         if hidden:
-            logger.info("Hidden %s existing opportunities that no longer meet the live-feed standard", hidden)
+            logger.info("Hidden %s expired opportunities from the live feed", hidden)
         duplicates = storage.hide_duplicate_opportunities()
         if duplicates:
             logger.info("Hidden %s duplicate opportunities from the live feed", duplicates)
@@ -891,23 +890,14 @@ def _apply_current_location_guards(
     return matches
 
 
-def _hide_non_actionable_opportunities(storage: Storage) -> int:
-    """Move legacy entries failing today's publication rules to Content Review.
-
-    This is recoverable moderation, not deletion. The creator can add a verified
-    official URL and restore a hidden entry from Content Review.
-    """
+def _hide_expired_opportunities(storage: Storage) -> int:
+    """Remove expired listings from the live feed without deleting history."""
     hidden = 0
     for item in storage.list_all_opportunities():
         if not item["visible"]:
             continue
         opportunity = item["opportunity"]
-        is_live = (
-            is_stageviva_eligible(opportunity)
-            and is_current_opportunity(opportunity)
-            and has_verified_official_application_url(opportunity, item["listing_url"])
-        )
-        if not is_live:
+        if not is_current_opportunity(opportunity):
             storage.hide_opportunity(item["id"])
             hidden += 1
     return hidden
@@ -1342,9 +1332,7 @@ def list_matches(
     matches = [
         item for item in matches
         if (_is_actionable_match(item["match"])
-            and is_stageviva_eligible(item["opportunity"])
-            and is_current_opportunity(item["opportunity"])
-            and has_verified_official_application_url(item["opportunity"], item["listing_url"]))
+            and is_current_opportunity(item["opportunity"]))
     ]
     return _present_matches_for_user(
         user, storage, matches, track=track, categories=selected_categories,
@@ -1359,9 +1347,7 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
     matches = [
         item for item in matches
         if (_is_actionable_match(item["match"])
-            and is_stageviva_eligible(item["opportunity"])
-            and is_current_opportunity(item["opportunity"])
-            and has_verified_official_application_url(item["opportunity"], item["listing_url"]))
+            and is_current_opportunity(item["opportunity"]))
     ]
     return _present_matches_for_user(user, storage, matches, track=None, categories=set())
 
@@ -1373,9 +1359,7 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
     released = _released_match_ids(user, storage, all_matches)
     for item in all_matches:
         if (item["opportunity_id"] == opportunity_id and _is_actionable_match(item["match"])
-                and is_stageviva_eligible(item["opportunity"])
-                and is_current_opportunity(item["opportunity"])
-                and has_verified_official_application_url(item["opportunity"], item["listing_url"])):
+                and is_current_opportunity(item["opportunity"])):
             if not _is_immediate_access_user(user) and opportunity_id not in released:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -1602,9 +1586,9 @@ def admin_add_opportunity(
         "application": {"application_url": {"value": payload.official_url.strip()}},
         "source": {"official_url": {"value": payload.official_url.strip()}},
     }
-    if not is_stageviva_eligible(opportunity) or not is_current_opportunity(opportunity):
+    if not is_current_opportunity(opportunity):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail="This listing is not a current paid or qualifying transition opportunity.")
+                            detail="This listing is no longer current.")
     item = DiscoveredOpportunity(
         payload.title.strip(), payload.official_url.strip(), "StageViva manual review",
         payload.official_url.strip(), "manual", description=payload.description.strip(),

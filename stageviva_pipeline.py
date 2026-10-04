@@ -28,7 +28,6 @@ from opportunity_discovery import (
 from instagram_discovery import discover_instagram_source
 from opportunity_intelligence import DiscoveryContext, analyse_opportunity
 from opportunity_lifecycle import is_current_opportunity
-from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
 from source_registry import Source, get_active_sources
 from storage import StageVivaStorage
 
@@ -136,18 +135,10 @@ def run_pipeline(
                 storage.reject_listing(item.listing_url, item.source_name, "expired")
                 skipped_expired += 1
                 continue
-            if not is_stageviva_eligible(opportunity):
-                if existing:
-                    storage.hide_opportunity(existing["id"])
-                storage.reject_listing(item.listing_url, item.source_name, "education_or_training")
-                skipped_ineligible += 1
-                continue
-            if not has_verified_official_application_url(opportunity, item.listing_url):
-                if existing:
-                    storage.hide_opportunity(existing["id"])
-                storage.reject_listing(item.listing_url, item.source_name, "official_link_unverified")
-                skipped_ineligible += 1
-                continue
+            # Publish current opportunities even when a source has omitted
+            # details or its official application link cannot yet be verified.
+            # Missing information is useful context, not a reason to hide a
+            # live listing. Expired listings remain excluded above.
             opportunity_id = storage.upsert_opportunity(item, opportunity)
             analysed += 1
             stored_opportunities += 1

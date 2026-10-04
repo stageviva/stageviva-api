@@ -78,6 +78,23 @@ class PipelineTest(unittest.TestCase):
             finally:
                 storage.close()
 
+    def test_current_listing_with_missing_details_is_stored(self) -> None:
+        source = Source("Test Source", "https://example.test/auditions", "ballet_dance")
+        item = DiscoveredOpportunity("Incomplete listing", "https://example.test/auditions/incomplete", source.name, source.url, source.category)
+        incomplete = {
+            "identity": {"title": {"value": "Audition"}},
+            "dates": {"application_deadline": {"value": "31 December 2099"}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                result = run_pipeline(source, [ARTIST], storage, discover=lambda _: [item],
+                    analyse=lambda _url, _context: incomplete, match=lambda _artist, _opportunity: MATCH)
+                self.assertEqual(result.stored_opportunities, 1)
+                self.assertEqual(result.stored_matches, 1)
+            finally:
+                storage.close()
+
 
 if __name__ == "__main__":
     unittest.main()
