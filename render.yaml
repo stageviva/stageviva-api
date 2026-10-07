@@ -16,3 +16,5 @@ services:
         value: "1"
       - key: STAGEVIVA_DAILY_TOTAL_ANALYSIS_LIMIT
         value: "5"
+      - key: STAGEVIVA_SOURCE_SCANS_ENABLED
+        value: "false"

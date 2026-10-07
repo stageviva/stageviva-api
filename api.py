@@ -1337,6 +1337,12 @@ def trigger_daily_source_scan(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Scheduler is not configured.")
     if not scheduler_secret or not hmac.compare_digest(scheduler_secret, configured_secret):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid scheduler credential.")
+    # Keep AI-powered catalogue scans opt-in.  This is deliberately off by
+    # default so a scheduler cannot unexpectedly consume model credit.
+    scans_enabled = os.getenv("STAGEVIVA_SOURCE_SCANS_ENABLED", "false").strip().lower()
+    if scans_enabled not in {"1", "true", "yes", "on"}:
+        logger.warning("Daily source scan skipped because source scans are disabled")
+        return {"status": "disabled"}
     if not source_scan_lock.acquire(blocking=False):
         return {"status": "already_running"}
 
