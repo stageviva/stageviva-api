@@ -1174,6 +1174,7 @@ def _apply_profile_answers_locally(
     """Save known setup answers immediately, without an unnecessary AI call."""
     updated = json.loads(json.dumps(artist_dna))
     identity = updated.setdefault("identity", {})
+    eligibility = updated.setdefault("eligibility", {})
     preferences = updated.setdefault("preferences", {})
     applied = 0
     for item in answers:
@@ -1193,6 +1194,15 @@ def _apply_profile_answers_locally(
             identity["age"] = age
         elif question in {"current_location", "where are you currently based?"}:
             identity["location"] = value
+        elif question in {
+            "work_rights", "do you currently have the right to work where you are based?",
+        }:
+            # This short setup question confirms status at the performer's
+            # current base; it does not claim a right to work in every region.
+            # Store it under visa_status so the question is genuinely complete
+            # while detailed regional rights remain performer-controlled in
+            # Edit profile.
+            eligibility["visa_status"] = value
         elif question in {
             "availability", "availability_review", "when are you next available for a new contract?",
             "is your current availability still right?",
