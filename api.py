@@ -501,8 +501,19 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="StageViva API", version="0.1.0", lifespan=lifespan)
 origins = [origin.strip() for origin in os.getenv(
     "STAGEVIVA_CORS_ORIGINS",
-    "http://localhost:5173,http://localhost:3000,http://localhost,capacitor://localhost",
+    "http://localhost:5173,http://localhost:3000",
 ).split(",") if origin.strip()]
+# Capacitor's native WebView identifies itself differently by platform and
+# version. Android uses https://localhost, while older iOS builds commonly use
+# capacitor://localhost. Keep these native origins regardless of a deployment
+# specific browser-origin setting so CV uploads work in the installed apps.
+origins = list(dict.fromkeys([
+    *origins,
+    "http://localhost",
+    "https://localhost",
+    "capacitor://localhost",
+    "ionic://localhost",
+]))
 app.add_middleware(
     CORSMiddleware, allow_origins=origins, allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
