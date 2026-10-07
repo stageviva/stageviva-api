@@ -48,6 +48,28 @@ class DailyPipelineTest(unittest.TestCase):
                 storage.close()
         self.assertEqual(seen_limits, [1])
 
+    def test_total_limit_stops_after_the_budget_is_used(self) -> None:
+        sources = [
+            Source("First", "https://example.test/first", "dance", automation_ready=True),
+            Source("Second", "https://example.test/second", "dance", automation_ready=True),
+        ]
+        seen: list[str] = []
+
+        def runner(source, _artists, _storage, *, limit):
+            seen.append(source.name)
+            return PipelineResult(2, 2, 2, 0, 0, 0, ())
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                result = run_daily_pipeline(
+                    storage, sources=sources, runner=runner, total_analysis_limit=2,
+                )
+            finally:
+                storage.close()
+        self.assertEqual(seen, ["First"])
+        self.assertEqual(result["analysed"], 2)
+
     def test_failure_redacts_an_access_token_before_recording(self) -> None:
         source = Source("Source", "https://example.test", "dance", automation_ready=True)
 

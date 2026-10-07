@@ -920,14 +920,19 @@ def _run_daily_source_scan() -> None:
         # Imported lazily to keep normal API boot lightweight.
         from daily_pipeline import run_daily_pipeline
 
-        limit = int(os.getenv("STAGEVIVA_DAILY_SOURCE_LIMIT", "5"))
+        limit = max(1, int(os.getenv("STAGEVIVA_DAILY_SOURCE_LIMIT", "1")))
+        total_limit = max(1, int(os.getenv("STAGEVIVA_DAILY_TOTAL_ANALYSIS_LIMIT", "5")))
         backup = create_database_backup(
             DATABASE_PATH, keep=max(1, int(os.getenv("STAGEVIVA_BACKUP_RETENTION_DAYS", "14"))),
         )
         logger.info("Daily database backup completed: %s", backup)
         storage = StageVivaStorage(DATABASE_PATH)
         try:
-            result = run_daily_pipeline(storage, limit_per_source=max(1, limit))
+            result = run_daily_pipeline(
+                storage,
+                limit_per_source=limit,
+                total_analysis_limit=total_limit,
+            )
             duplicates = storage.hide_duplicate_opportunities()
             if duplicates:
                 logger.info("Hidden %s duplicate opportunities after source scan", duplicates)
