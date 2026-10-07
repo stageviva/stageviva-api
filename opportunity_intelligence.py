@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from ai_safety import require_ai_requests_enabled
 from opportunity_schema import OPPORTUNITY_SCHEMA
 
 
@@ -866,6 +867,7 @@ def analyse_opportunity(
         f"{page_text}"
     )
 
+    require_ai_requests_enabled()
     response = (
         client or OpenAI()
     ).responses.create(

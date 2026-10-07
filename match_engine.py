@@ -19,6 +19,7 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from ai_safety import require_ai_requests_enabled
 from match_schema import MATCH_SCHEMA
 
 
@@ -948,6 +949,7 @@ def match_artist_to_opportunity(
         f"{json.dumps(opportunity, ensure_ascii=False, indent=2)}\n"
     )
 
+    require_ai_requests_enabled()
     response = (
         client or OpenAI(timeout=OPENAI_REQUEST_TIMEOUT_SECONDS, max_retries=1)
     ).responses.create(

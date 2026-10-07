@@ -18,3 +18,5 @@ services:
         value: "5"
       - key: STAGEVIVA_SOURCE_SCANS_ENABLED
         value: "false"
+      - key: STAGEVIVA_AI_REQUESTS_ENABLED
+        value: "false"
