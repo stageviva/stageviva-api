@@ -645,11 +645,33 @@ class StageVivaStorage:
         """).fetchall()
         return [(row["id"], json.loads(row["dna_json"])) for row in rows]
 
-    def list_opportunity_dnas(self) -> list[tuple[str, dict[str, Any]]]:
-        rows = self.connection.execute(
-            "SELECT id, opportunity_json FROM opportunities WHERE visible = 1",
-        ).fetchall()
+    def list_opportunity_dnas(self, limit: int | None = None) -> list[tuple[str, dict[str, Any]]]:
+        query = (
+            "SELECT id, opportunity_json FROM opportunities WHERE visible = 1 "
+            "ORDER BY updated_at DESC"
+        )
+        parameters: tuple[int, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters = (max(1, limit),)
+        rows = self.connection.execute(query, parameters).fetchall()
         return [(row["id"], json.loads(row["opportunity_json"])) for row in rows]
+
+    def list_cached_matches_for_artist(
+        self, artist_id: str,
+    ) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+        rows = self.connection.execute("""
+            SELECT match_results.opportunity_id, opportunities.opportunity_json,
+                   match_results.match_json
+            FROM match_results
+            JOIN opportunities ON opportunities.id = match_results.opportunity_id
+            WHERE match_results.artist_id = ? AND opportunities.visible = 1
+        """, (artist_id,)).fetchall()
+        return [(
+            row["opportunity_id"],
+            json.loads(row["opportunity_json"]),
+            json.loads(row["match_json"]),
+        ) for row in rows]
 
     def list_matches_for_user(self, user_id: str) -> list[dict[str, Any]]:
         rows = self.connection.execute("""

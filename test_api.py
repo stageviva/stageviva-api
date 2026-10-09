@@ -106,9 +106,8 @@ class ApiTest(unittest.TestCase):
             })
             self.assertEqual(details.status_code, 200, details.text)
             listing = self.client.get("/admin/opportunities", headers=headers).json()[0]
-            opportunity = listing["opportunity"]
-            self.assertEqual(opportunity["identity"]["description"]["value"], "Updated paid employment description.")
-            self.assertEqual(opportunity["application"]["application_url"]["value"], "https://example.org/updated-audition")
+            self.assertEqual(listing["description"], "Updated paid employment description.")
+            self.assertEqual(listing["official_url"], "https://example.org/updated-audition")
 
     def test_lovable_session_creates_and_reuses_one_stageviva_user(self) -> None:
         claims = {
@@ -150,6 +149,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["artist_dna"]["identity"]["nationality"], "Spanish")
         enrich.assert_not_called()
+
+    def test_profile_answer_never_starts_a_catalogue_ai_rematch(self) -> None:
+        token = self.register("safe-answers@example.com", "Safe Artist")
+        headers = {"Authorization": f"Bearer {token}"}
+        self.client.put("/me/artist-dna", headers=headers, json={
+            "artist_dna": {
+                "identity": {"name": "Safe Artist"},
+                "preferences": {"availability": "unknown"},
+            },
+        })
+        with patch.object(api, "match_artist_to_opportunity") as match:
+            response = self.client.post("/me/artist-dna/answers", headers=headers, json={
+                "answers": [{"id": "availability", "answer": "Within 3 months"}],
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        match.assert_not_called()
 
     def test_contract_preference_answer_clears_the_matching_question(self) -> None:
         token = self.register("contracts@example.com", "Contract Artist")

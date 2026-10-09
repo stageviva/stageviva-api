@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from pypdf import PdfReader
 from openai import OpenAI
 from artist_schema import ARTIST_SCHEMA
+from ai_safety import reserve_ai_request
 
 load_dotenv()
 
@@ -402,8 +403,9 @@ Return ONLY the structured JSON matching the provided schema.
 # CALL OPENAI
 # ---------------------------------------------------------
 
+reserve_ai_request("gpt-4o-mini", "legacy_artist_analysis")
 response = client.responses.create(
-    model="gpt-5.6-luna",
+    model="gpt-4o-mini",
     instructions=instructions,
     input=cv_text,
     text={

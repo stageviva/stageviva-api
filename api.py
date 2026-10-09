@@ -33,7 +33,7 @@ from artist_intelligence import analyse_artist, enrich_artist_dna
 from cv_headshot import extract_cv_headshot
 from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
-from match_engine import _apply_location_and_work_rights_guard
+from match_engine import _apply_location_and_work_rights_guard, reapply_deterministic_match_guards
 from match_service import match_artist_to_opportunity
 from native_push_notifications import (
     NativePushConfigurationError,
@@ -805,12 +805,13 @@ def _match_artist_against_catalogue(
     artist_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage,
 ) -> dict[str, int]:
     matched = queued = 0
-    opportunities = storage.list_opportunity_dnas()
+    refresh_limit = max(1, int(os.getenv("STAGEVIVA_MAX_MATCHES_PER_REFRESH", "20")))
+    opportunities = storage.list_opportunity_dnas(limit=refresh_limit)
 
     # OpenAI matching is network-bound. Evaluate a small group concurrently,
     # then keep database writes serial so SQLite remains reliable.
     results: dict[str, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=min(6, max(1, len(opportunities)))) as executor:
+    with ThreadPoolExecutor(max_workers=min(2, max(1, len(opportunities)))) as executor:
         futures = {
             executor.submit(match_artist_to_opportunity, artist_dna, opportunity): opportunity_id
             for opportunity_id, opportunity in opportunities
@@ -838,7 +839,8 @@ def _match_opportunity_against_registered_artists(
 ) -> dict[str, int]:
     """Refresh all scores after an owner adds or materially corrects a listing."""
     matched = queued = 0
-    for artist_id, artist_dna in storage.list_registered_artists():
+    artist_limit = max(1, int(os.getenv("STAGEVIVA_MAX_ARTISTS_PER_OPPORTUNITY", "20")))
+    for artist_id, artist_dna in storage.list_registered_artists()[:artist_limit]:
         result = match_artist_to_opportunity(artist_dna, opportunity)
         storage.upsert_match(artist_id, opportunity_id, result)
         matched += 1
@@ -850,6 +852,21 @@ def _match_opportunity_against_registered_artists(
 def _store_and_match_artist(user_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage) -> dict[str, int]:
     artist_id = storage.upsert_artist_for_user(user_id, artist_dna)
     return _match_artist_against_catalogue(artist_id, artist_dna, storage)
+
+
+def _store_artist_and_refresh_cached_guards(
+    user_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage,
+) -> dict[str, int]:
+    """Save profile edits without a catalogue-wide billable rematch."""
+    artist_id = storage.upsert_artist_for_user(user_id, artist_dna)
+    refreshed = queued = 0
+    for opportunity_id, opportunity, existing_match in storage.list_cached_matches_for_artist(artist_id):
+        result = reapply_deterministic_match_guards(artist_dna, opportunity, existing_match)
+        storage.upsert_match(artist_id, opportunity_id, result)
+        refreshed += 1
+        if _is_actionable_match(result) and result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
+            queued += int(storage.queue_notification(artist_id, opportunity_id, result))
+    return {"matched_opportunities": refreshed, "queued_notifications": queued}
 
 
 def _refresh_existing_artist_matches(artist_id: str, artist_dna: dict[str, Any]) -> None:
@@ -1099,7 +1116,7 @@ def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
 
 @app.put("/me/artist-dna")
 def save_artist_dna(payload: ArtistDNARequest, user: CurrentUser, storage: Storage) -> dict[str, Any]:
-    return _store_and_match_artist(user["id"], payload.artist_dna, storage)
+    return _store_artist_and_refresh_cached_guards(user["id"], payload.artist_dna, storage)
 
 
 @app.get("/me/headshot")
@@ -1242,7 +1259,7 @@ def update_artist_dna(payload: ArtistDNAUpdateRequest, user: CurrentUser, storag
             str(preference_updates["availability"] or "").strip(),
         )
     _synchronise_date_of_birth(updated_dna.setdefault("identity", {}))
-    outcome = _store_and_match_artist(user["id"], updated_dna, storage)
+    outcome = _store_artist_and_refresh_cached_guards(user["id"], updated_dna, storage)
     return {"artist_dna": _artist_dna_with_profile_questions(updated_dna), **outcome}
 
 
@@ -1258,10 +1275,10 @@ def answer_artist_questions(
         if locally_applied:
             # These answers include availability, contract preferences and
             # gender, all of which can change which opportunities are suitable.
-            outcome = _store_and_match_artist(user["id"], updated_dna, storage)
+            outcome = _store_artist_and_refresh_cached_guards(user["id"], updated_dna, storage)
         else:
             updated_dna = enrich_artist_dna(artist["dna"], payload.answers)
-            outcome = _store_and_match_artist(user["id"], updated_dna, storage)
+            outcome = _store_artist_and_refresh_cached_guards(user["id"], updated_dna, storage)
     except Exception as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

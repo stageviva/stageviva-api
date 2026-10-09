@@ -20,3 +20,13 @@ services:
         value: "false"
       - key: STAGEVIVA_AI_REQUESTS_ENABLED
         value: "false"
+      - key: STAGEVIVA_ALLOWED_AI_MODELS
+        value: "gpt-4o-mini"
+      - key: STAGEVIVA_AI_DAILY_REQUEST_LIMIT
+        value: "100"
+      - key: STAGEVIVA_AI_USAGE_STATE_PATH
+        value: /var/data/ai-request-usage.json
+      - key: STAGEVIVA_MAX_MATCHES_PER_REFRESH
+        value: "20"
+      - key: STAGEVIVA_MAX_ARTISTS_PER_OPPORTUNITY
+        value: "20"

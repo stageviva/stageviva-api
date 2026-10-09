@@ -10,7 +10,7 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from ai_safety import require_ai_requests_enabled
+from ai_safety import reserve_ai_request
 from artist_schema import ARTIST_SCHEMA
 
 
@@ -595,7 +595,7 @@ def analyse_artist(
         f"{cv_text}"
     )
 
-    require_ai_requests_enabled()
+    reserve_ai_request(ARTIST_ANALYSIS_MODEL, "artist_analysis")
     active_client = client or _analysis_client()
     response = active_client.responses.create(
         model=ARTIST_ANALYSIS_MODEL,
@@ -688,7 +688,7 @@ def _audit_artist_dna(
     performer identity visible in the source CV.
     """
     candidates = _material_credit_lines(cv_text)
-    require_ai_requests_enabled()
+    reserve_ai_request(ARTIST_ANALYSIS_MODEL, "artist_quality_audit")
     response = client.responses.create(
         model=ARTIST_ANALYSIS_MODEL,
         **_reasoning_options(),
@@ -831,7 +831,7 @@ def enrich_artist_dna(
 ) -> dict[str, Any]:
     """Merge performer-confirmed answers into Artist DNA without inventing facts."""
     load_dotenv()
-    require_ai_requests_enabled()
+    reserve_ai_request(ARTIST_ANALYSIS_MODEL, "artist_enrichment")
     response = (client or _analysis_client()).responses.create(
         model=ARTIST_ANALYSIS_MODEL,
         **_reasoning_options(),

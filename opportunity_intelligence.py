@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -14,13 +15,14 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from ai_safety import require_ai_requests_enabled
+from ai_safety import reserve_ai_request
 from opportunity_schema import OPPORTUNITY_SCHEMA
 
 
 _DIRECTORY_DOMAINS = frozenset({
     "balletplaces.com", "danceeurope.net", "ballee.co", "entertainersworldwidejobs.com", "allcasting.com",
 })
+OPPORTUNITY_ANALYSIS_MODEL = os.getenv("STAGEVIVA_OPPORTUNITY_ANALYSIS_MODEL", "gpt-4o-mini")
 
 
 # ============================================================
@@ -867,11 +869,11 @@ def analyse_opportunity(
         f"{page_text}"
     )
 
-    require_ai_requests_enabled()
+    reserve_ai_request(OPPORTUNITY_ANALYSIS_MODEL, "opportunity_analysis")
     response = (
         client or OpenAI()
     ).responses.create(
-        model="gpt-5.6-luna",
+        model=OPPORTUNITY_ANALYSIS_MODEL,
         instructions=ANALYSIS_INSTRUCTIONS,
         input=prompt,
         text={

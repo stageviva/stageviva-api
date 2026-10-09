@@ -18,7 +18,7 @@ from typing import Any
 from openai import OpenAI
 from pypdf import PdfReader
 
-from ai_safety import require_ai_requests_enabled
+from ai_safety import reserve_ai_request
 
 HEADSHOT_MODEL = os.getenv("STAGEVIVA_HEADSHOT_MODEL", "gpt-4o-mini")
 MAX_CANDIDATES = 6
@@ -59,9 +59,9 @@ def _candidate_images(cv_path: str | Path) -> list[Any]:
 
 
 def _choose_headshot(candidates: list[Any], client: OpenAI) -> Any | None:
-    require_ai_requests_enabled()
     if not candidates:
         return None
+    reserve_ai_request(HEADSHOT_MODEL, "headshot_selection")
     content: list[dict[str, Any]] = [{
         "type": "input_text",
         "text": (

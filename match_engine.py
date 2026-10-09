@@ -10,6 +10,7 @@ It only compares them.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from ai_safety import require_ai_requests_enabled
+from ai_safety import reserve_ai_request
 from match_schema import MATCH_SCHEMA
 
 
@@ -889,6 +890,24 @@ def _apply_requirement_guards(
     return result
 
 
+def reapply_deterministic_match_guards(
+    artist_dna: dict[str, Any],
+    opportunity: dict[str, Any],
+    existing_match: dict[str, Any],
+) -> dict[str, Any]:
+    """Refresh hard eligibility safeguards without making an AI request.
+
+    Profile-question answers must never trigger a catalogue-wide OpenAI run.
+    Reusing the existing qualitative comparison while reapplying factual
+    gender, skill, location, work-rights and date guards keeps the feed safe and
+    responsive until the next deliberate full refresh.
+    """
+    guarded = copy.deepcopy(existing_match)
+    guarded = _apply_requirement_guards(artist_dna, opportunity, guarded)
+    guarded = _apply_gender_requirement_guard(artist_dna, opportunity, guarded)
+    return _apply_location_and_work_rights_guard(artist_dna, opportunity, guarded)
+
+
 # ============================================================
 # VALIDATION
 # ============================================================
@@ -949,7 +968,7 @@ def match_artist_to_opportunity(
         f"{json.dumps(opportunity, ensure_ascii=False, indent=2)}\n"
     )
 
-    require_ai_requests_enabled()
+    reserve_ai_request(MATCHING_MODEL, "artist_opportunity_match")
     response = (
         client or OpenAI(timeout=OPENAI_REQUEST_TIMEOUT_SECONDS, max_retries=1)
     ).responses.create(
