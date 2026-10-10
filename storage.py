@@ -705,14 +705,17 @@ class StageVivaStorage:
 
     def claim_legacy_unreadable_cv_retries(self, limit: int = 10) -> list[str]:
         """Retry pre-OCR image PDFs once after the OCR-capable release."""
-        setting_key = "migration_retry_unreadable_cvs_with_ocr_2026_10"
+        setting_key = "migration_retry_unreadable_cvs_with_ocr_2026_10_v2"
         if self.connection.execute(
             "SELECT 1 FROM app_settings WHERE key = ?", (setting_key,),
         ).fetchone() is not None:
             return []
         rows = self.connection.execute("""
             SELECT user_id FROM cv_analysis_jobs
-            WHERE status = 'failed' AND error LIKE 'No usable text could be extracted%'
+            WHERE status = 'failed' AND (
+                error LIKE 'No usable text could be extracted%'
+                OR error LIKE 'This PDF could not be read%'
+            )
             ORDER BY completed_at DESC
             LIMIT ?
         """, (limit,)).fetchall()
