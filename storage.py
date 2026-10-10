@@ -222,11 +222,31 @@ class StageVivaStorage:
         self.connection.execute("""
             INSERT OR IGNORE INTO cv_upload_events (id, user_id, created_at)
             SELECT 'legacy_cv_' || user_id, user_id, started_at FROM cv_analysis_jobs
-            WHERE NOT EXISTS (
+            WHERE status = 'complete' AND NOT EXISTS (
                 SELECT 1 FROM cv_upload_events
                 WHERE cv_upload_events.user_id = cv_analysis_jobs.user_id
             )
         """)
+        # Earlier versions counted failed analyses as uploads. Refund the
+        # current allowance once for affected performers (including accounts
+        # whose image-only PDF could not previously be read).
+        refund_key = "migration_refund_failed_cv_uploads_2026_10"
+        if self.connection.execute(
+            "SELECT 1 FROM app_settings WHERE key = ?", (refund_key,),
+        ).fetchone() is None:
+            month_start = datetime.now(timezone.utc).replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0,
+            ).isoformat()
+            self.connection.execute("""
+                DELETE FROM cv_upload_events
+                WHERE created_at >= ? AND user_id IN (
+                    SELECT user_id FROM cv_analysis_jobs WHERE status = 'failed'
+                )
+            """, (month_start,))
+            self.connection.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, 'complete')",
+                (refund_key,),
+            )
         self.connection.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -633,6 +653,22 @@ class StageVivaStorage:
             self.connection.rollback()
             raise
 
+    def release_latest_cv_upload_this_month(self, user_id: str) -> bool:
+        """Return an allowance consumed by an analysis that could not complete."""
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        cursor = self.connection.execute("""
+            DELETE FROM cv_upload_events
+            WHERE id = (
+                SELECT id FROM cv_upload_events
+                WHERE user_id = ? AND created_at >= ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+            )
+        """, (user_id, month_start))
+        self.connection.commit()
+        return cursor.rowcount > 0
+
     def reserve_cv_upload(self, user_id: str) -> bool:
         """Record a CV analysis while allowing performers to update freely."""
         self.connection.execute("BEGIN IMMEDIATE")
@@ -666,6 +702,29 @@ class StageVivaStorage:
             "SELECT user_id FROM cv_analysis_jobs WHERE status = 'processing'",
         ).fetchall()
         return [str(row["user_id"]) for row in rows]
+
+    def claim_legacy_unreadable_cv_retries(self, limit: int = 10) -> list[str]:
+        """Retry pre-OCR image PDFs once after the OCR-capable release."""
+        setting_key = "migration_retry_unreadable_cvs_with_ocr_2026_10"
+        if self.connection.execute(
+            "SELECT 1 FROM app_settings WHERE key = ?", (setting_key,),
+        ).fetchone() is not None:
+            return []
+        rows = self.connection.execute("""
+            SELECT user_id FROM cv_analysis_jobs
+            WHERE status = 'failed' AND error LIKE 'No usable text could be extracted%'
+            ORDER BY completed_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        user_ids = [str(row["user_id"]) for row in rows]
+        for user_id in user_ids:
+            self.start_cv_analysis(user_id)
+        self.connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, 'complete')",
+            (setting_key,),
+        )
+        self.connection.commit()
+        return user_ids
 
     def get_artist_for_user(self, user_id: str) -> dict[str, Any] | None:
         row = self.connection.execute("""

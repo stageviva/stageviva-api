@@ -470,6 +470,10 @@ async def lifespan(_: FastAPI):
         if duplicates:
             logger.info("Hidden %s duplicate opportunities from the live feed", duplicates)
         pending_users = storage.list_processing_cv_analyses()
+        # The OCR release can repair existing image-only CVs once, including
+        # the launch user's failed profile, without asking for another upload.
+        pending_users.extend(storage.claim_legacy_unreadable_cv_retries())
+        pending_users = list(dict.fromkeys(pending_users))
         artists_to_refresh = storage.list_registered_artists() if seeded else []
     finally:
         storage.close()
@@ -1112,7 +1116,16 @@ def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
         storage.complete_cv_analysis(user_id)
     except Exception as error:
         logger.exception("CV analysis failed for user %s", user_id)
-        storage.complete_cv_analysis(user_id, str(error))
+        # A failed analysis is not a usable upload and must never reduce the
+        # performer's monthly allowance.
+        storage.release_latest_cv_upload_this_month(user_id)
+        message = str(error)
+        if "No usable text could be extracted" in message:
+            message = (
+                "We couldn't read any text in this CV. Please upload a DOCX, "
+                "a text-based PDF, or a clearer scanned PDF and try again."
+            )
+        storage.complete_cv_analysis(user_id, message)
     finally:
         storage.close()
 

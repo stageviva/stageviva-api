@@ -110,6 +110,10 @@ def extract_cv_text(
                 f"Could not read PDF CV: {error}"
             ) from error
 
+        text = text.strip()
+        if not text:
+            text = _extract_scanned_pdf_text(path, max_characters)
+
         return text[:max_characters]
 
     # --------------------------------------------------------
@@ -148,6 +152,38 @@ def extract_cv_text(
         f"Unsupported CV format: {suffix}. "
         "Use PDF, DOCX or TXT."
     )
+
+
+def _extract_scanned_pdf_text(path: Path, max_characters: int) -> str:
+    """Read an image-only PDF locally without sending CV pages off-server."""
+    try:
+        import pymupdf
+        import pytesseract
+        from PIL import Image
+    except ImportError as error:
+        raise ArtistAnalysisError(
+            "This PDF has no selectable text. Please upload a text-based PDF or DOCX CV."
+        ) from error
+
+    pages: list[str] = []
+    try:
+        with pymupdf.open(path) as document:
+            # CVs should be short. The cap prevents a malformed document from
+            # monopolising a worker while still covering ordinary portfolios.
+            for page in list(document)[:12]:
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+                page_text = pytesseract.image_to_string(image, lang="eng").strip()
+                if page_text:
+                    pages.append(page_text)
+                if sum(len(item) for item in pages) >= max_characters:
+                    break
+    except Exception as error:
+        raise ArtistAnalysisError(
+            "This PDF could not be read. Please upload a text-based PDF or DOCX CV."
+        ) from error
+
+    return "\n".join(pages)[:max_characters]
 
 
 # ============================================================

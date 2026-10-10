@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from artist_intelligence import (
     _cap_training_only_classical_ballet,
     _material_credit_lines,
     _normalise_artist_disciplines,
+    extract_cv_text,
 )
 
 
@@ -51,6 +55,21 @@ class ArtistDisciplineNormalisationTest(unittest.TestCase):
         lines = _material_credit_lines(cv)
         self.assertEqual(len(lines), 1)
         self.assertIn("Royal Caribbean Entertainment", lines[0])
+
+    def test_image_only_pdf_uses_local_ocr_fallback(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cv.pdf"
+            path.write_bytes(b"placeholder")
+            empty_page = unittest.mock.Mock()
+            empty_page.extract_text.return_value = ""
+            reader = unittest.mock.Mock(pages=[empty_page])
+            with patch("pypdf.PdfReader", return_value=reader), patch(
+                "artist_intelligence._extract_scanned_pdf_text",
+                return_value="BCCA FINLAY\nProfessional dancer",
+            ) as ocr:
+                text = extract_cv_text(str(path))
+            self.assertIn("Professional dancer", text)
+            ocr.assert_called_once_with(path, 45_000)
 
 
 if __name__ == "__main__":

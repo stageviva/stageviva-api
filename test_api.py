@@ -53,6 +53,36 @@ class ApiTest(unittest.TestCase):
         other_token = self.register("other@example.com", "Other Artist")
         self.assertEqual(self.client.get("/matches", headers={"Authorization": f"Bearer {other_token}"}).json(), [])
 
+    def test_failed_cv_analysis_returns_the_upload_allowance(self) -> None:
+        token = self.register("unreadable@example.com", "Unreadable Artist")
+        headers = {"Authorization": f"Bearer {token}"}
+        with patch.object(api, "analyse_artist", side_effect=RuntimeError(
+            "No usable text could be extracted from uploaded CV."
+        )):
+            response = self.client.post(
+                "/me/cv", headers=headers,
+                files={"cv": ("scan.pdf", b"not-empty", "application/pdf")},
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        analysis = self.client.get("/me/cv-analysis", headers=headers)
+        self.assertEqual(analysis.json()["status"], "failed")
+        self.assertEqual(analysis.json()["cv_uploads"]["used"], 0)
+        self.assertIn("couldn't read any text", analysis.json()["error"])
+
+    def test_legacy_unreadable_cv_is_claimed_for_one_ocr_retry(self) -> None:
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            user = storage.create_user("legacy-scan@example.com", "Legacy Scan", "hash")
+            storage.start_cv_analysis(user["id"])
+            storage.complete_cv_analysis(
+                user["id"], "No usable text could be extracted from /uploads/cv.pdf.",
+            )
+            self.assertEqual(storage.claim_legacy_unreadable_cv_retries(), [user["id"]])
+            self.assertEqual(storage.get_cv_analysis(user["id"])["status"], "processing")
+            self.assertEqual(storage.claim_legacy_unreadable_cv_retries(), [])
+        finally:
+            storage.close()
+
     def test_user_can_register_a_private_phone_push_subscription(self) -> None:
         token = self.register("push@example.com", "Push Artist")
         headers = {"Authorization": f"Bearer {token}"}
