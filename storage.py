@@ -183,6 +183,23 @@ class StageVivaStorage:
                 opportunity_ids_json TEXT NOT NULL, created_at TEXT NOT NULL,
                 PRIMARY KEY (user_id, week_start)
             );
+            CREATE TABLE IF NOT EXISTS billing_subscriptions (
+                user_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL DEFAULT 'stripe',
+                provider_customer_id TEXT,
+                provider_subscription_id TEXT,
+                plan TEXT,
+                price_id TEXT,
+                status TEXT NOT NULL,
+                current_period_end INTEGER,
+                cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS billing_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                processed_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS push_subscriptions (
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL, endpoint TEXT NOT NULL UNIQUE,
                 subscription_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -206,6 +223,10 @@ class StageVivaStorage:
         # explicitly created as Free below, regardless of an old SQLite column
         # default left behind by a prior deployment.
         self._ensure_column("users", "membership_tier", "TEXT NOT NULL DEFAULT 'free'")
+        # Manual founder grants must never be revoked by a later Stripe event.
+        # Only memberships explicitly marked ``stripe`` are downgraded when a
+        # paid subscription ends.
+        self._ensure_column("users", "membership_source", "TEXT NOT NULL DEFAULT 'manual'")
         self._ensure_column("opportunities", "visible", "INTEGER NOT NULL DEFAULT 1")
         # Record why a listing is hidden so automatic catalogue maintenance
         # never restores something the founder deliberately removed.  Rows
@@ -215,6 +236,16 @@ class StageVivaStorage:
         self.connection.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_auth_id
             ON users(external_auth_id) WHERE external_auth_id IS NOT NULL
+        """)
+        self.connection.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_customer
+            ON billing_subscriptions(provider_customer_id)
+            WHERE provider_customer_id IS NOT NULL AND provider_customer_id != ''
+        """)
+        self.connection.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_subscription
+            ON billing_subscriptions(provider_subscription_id)
+            WHERE provider_subscription_id IS NOT NULL AND provider_subscription_id != ''
         """)
         # A user who already analysed a CV before this limit was introduced has
         # used one upload.  This migration is idempotent and contains no CV
@@ -558,13 +589,99 @@ class StageVivaStorage:
         self.connection.commit()
         return self.get_user(user_id)  # type: ignore[return-value]
 
-    def update_membership_tier(self, user_id: str, membership_tier: str) -> dict[str, Any] | None:
+    def update_membership_tier(
+        self, user_id: str, membership_tier: str, *, source: str = "manual",
+    ) -> dict[str, Any] | None:
         """Internal billing boundary; Stripe/App Store wiring will call this later."""
         self.connection.execute("""
-            UPDATE users SET membership_tier = ?, updated_at = ? WHERE id = ?
-        """, (membership_tier, _utc_now(), user_id))
+            UPDATE users SET membership_tier = ?, membership_source = ?, updated_at = ? WHERE id = ?
+        """, (membership_tier, source, _utc_now(), user_id))
         self.connection.commit()
         return self.get_user(user_id)
+
+    def update_stripe_membership(self, user_id: str, *, entitled: bool) -> dict[str, Any] | None:
+        """Apply Stripe access without overriding School, Admin, or founder grants."""
+        user = self.get_user(user_id)
+        if not user:
+            return None
+        tier = str(user.get("membership_tier") or "free").lower()
+        source = str(user.get("membership_source") or "manual").lower()
+        if entitled:
+            if tier not in {"admin", "school"}:
+                return self.update_membership_tier(user_id, "pro", source="stripe")
+            return user
+        if source == "stripe" and tier == "pro":
+            return self.update_membership_tier(user_id, "free", source="manual")
+        return user
+
+    def get_billing_subscription_for_user(self, user_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM billing_subscriptions WHERE user_id = ?", (user_id,),
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["cancel_at_period_end"] = bool(result["cancel_at_period_end"])
+        return result
+
+    def find_billing_user(
+        self, *, provider_customer_id: str = "", provider_subscription_id: str = "",
+    ) -> str | None:
+        if provider_subscription_id:
+            row = self.connection.execute(
+                "SELECT user_id FROM billing_subscriptions WHERE provider_subscription_id = ?",
+                (provider_subscription_id,),
+            ).fetchone()
+            if row:
+                return str(row["user_id"])
+        if provider_customer_id:
+            row = self.connection.execute(
+                "SELECT user_id FROM billing_subscriptions WHERE provider_customer_id = ?",
+                (provider_customer_id,),
+            ).fetchone()
+            if row:
+                return str(row["user_id"])
+        return None
+
+    def upsert_billing_subscription(
+        self, user_id: str, *, provider_customer_id: str, provider_subscription_id: str,
+        plan: str, price_id: str, status: str, current_period_end: int | None,
+        cancel_at_period_end: bool,
+    ) -> dict[str, Any]:
+        self.connection.execute("""
+            INSERT INTO billing_subscriptions (
+                user_id, provider, provider_customer_id, provider_subscription_id,
+                plan, price_id, status, current_period_end, cancel_at_period_end, updated_at
+            ) VALUES (?, 'stripe', ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                provider='stripe',
+                provider_customer_id=excluded.provider_customer_id,
+                provider_subscription_id=excluded.provider_subscription_id,
+                plan=excluded.plan,
+                price_id=excluded.price_id,
+                status=excluded.status,
+                current_period_end=excluded.current_period_end,
+                cancel_at_period_end=excluded.cancel_at_period_end,
+                updated_at=excluded.updated_at
+        """, (
+            user_id, provider_customer_id or None, provider_subscription_id or None,
+            plan or None, price_id or None, status, current_period_end,
+            int(cancel_at_period_end), _utc_now(),
+        ))
+        self.connection.commit()
+        return self.get_billing_subscription_for_user(user_id)  # type: ignore[return-value]
+
+    def billing_event_processed(self, event_id: str) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM billing_events WHERE event_id = ?", (event_id,),
+        ).fetchone() is not None
+
+    def record_billing_event(self, event_id: str, event_type: str) -> None:
+        self.connection.execute("""
+            INSERT OR IGNORE INTO billing_events (event_id, event_type, processed_at)
+            VALUES (?, ?, ?)
+        """, (event_id, event_type, _utc_now()))
+        self.connection.commit()
 
     def delete_user_account(self, user_id: str) -> dict[str, Any] | None:
         """Permanently remove one account and its active StageViva data."""
@@ -575,6 +692,7 @@ class StageVivaStorage:
         self.connection.execute("DELETE FROM cv_analysis_jobs WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM cv_upload_events WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM weekly_match_releases WHERE user_id = ?", (user_id,))
+        self.connection.execute("DELETE FROM billing_subscriptions WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM push_subscriptions WHERE user_id = ?", (user_id,))
         if artist_id:
             self.connection.execute("DELETE FROM notification_outbox WHERE artist_id = ?", (artist_id,))

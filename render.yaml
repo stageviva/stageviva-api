@@ -28,3 +28,9 @@ services:
         value: "20"
       - key: STAGEVIVA_MAX_ARTISTS_PER_OPPORTUNITY
         value: "20"
+      - key: STAGEVIVA_STRIPE_MODE
+        value: test
+      - key: STAGEVIVA_STRIPE_REQUESTS_ENABLED
+        value: "false"
+      - key: STAGEVIVA_PUBLIC_APP_URL
+        value: https://stageviva.com

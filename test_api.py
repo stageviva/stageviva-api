@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import hashlib
+import hmac
+import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -342,6 +346,101 @@ class ApiTest(unittest.TestCase):
         access = self.client.get("/me/access", headers=performer_headers)
         self.assertEqual(access.json()["opportunities"]["release"], "immediate")
         self.assertTrue(access.json()["opportunities"]["show_full_details"])
+
+    def test_stripe_checkout_uses_the_authenticated_user_and_selected_test_price(self) -> None:
+        token = self.register("buyer@example.com", "Premium Buyer")
+        headers = {"Authorization": f"Bearer {token}"}
+        configured = {
+            "STAGEVIVA_STRIPE_MODE": "test",
+            "STAGEVIVA_STRIPE_REQUESTS_ENABLED": "true",
+            "STRIPE_PREMIUM_MONTHLY_PRICE_ID": "price_test_monthly",
+            "STRIPE_AUDITION_SEASON_PRICE_ID": "price_test_season",
+        }
+        with patch.dict(api.os.environ, configured, clear=False), patch.object(
+            api, "create_checkout_session",
+            return_value={"id": "cs_test_safe", "url": "https://checkout.stripe.com/c/pay/test"},
+        ) as create_session:
+            response = self.client.post(
+                "/billing/checkout", headers=headers, json={"plan": "premium_monthly"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["session_id"], "cs_test_safe")
+        call = create_session.call_args.kwargs
+        self.assertEqual(call["email"], "buyer@example.com")
+        self.assertEqual(call["plan"], "premium_monthly")
+        self.assertTrue(call["user_id"].startswith("user_"))
+
+    def test_signed_stripe_webhook_grants_premium_once_and_cancellation_removes_it(self) -> None:
+        token = self.register("stripe-member@example.com", "Stripe Member")
+        headers = {"Authorization": f"Bearer {token}"}
+        user_id = self.client.get("/me", headers=headers).json()["id"]
+        configured = {
+            "STRIPE_WEBHOOK_SECRET": "whsec_test_stageviva",
+            "STRIPE_PREMIUM_MONTHLY_PRICE_ID": "price_test_monthly",
+            "STRIPE_AUDITION_SEASON_PRICE_ID": "price_test_season",
+        }
+
+        def deliver(event: dict) -> object:
+            payload = json.dumps(event, separators=(",", ":")).encode()
+            timestamp = int(time.time())
+            signature = hmac.new(
+                configured["STRIPE_WEBHOOK_SECRET"].encode(),
+                f"{timestamp}.".encode() + payload,
+                hashlib.sha256,
+            ).hexdigest()
+            return self.client.post(
+                "/billing/webhook", content=payload,
+                headers={"Stripe-Signature": f"t={timestamp},v1={signature}", "Content-Type": "application/json"},
+            )
+
+        active_subscription = {
+            "id": "sub_test_stageviva", "customer": "cus_test_stageviva", "status": "active",
+            "cancel_at_period_end": False, "current_period_end": 1_900_000_000,
+            "metadata": {"stageviva_user_id": user_id, "stageviva_plan": "premium_monthly"},
+            "items": {"data": [{"price": {"id": "price_test_monthly"}}]},
+        }
+        active_event = {
+            "id": "evt_test_active", "type": "customer.subscription.updated",
+            "data": {"object": active_subscription},
+        }
+        with patch.dict(api.os.environ, configured, clear=False):
+            granted = deliver(active_event)
+            duplicate = deliver(active_event)
+        self.assertEqual(granted.status_code, 200, granted.text)
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertEqual(self.client.get("/me", headers=headers).json()["membership_tier"], "pro")
+
+        cancelled_subscription = {**active_subscription, "status": "canceled"}
+        cancelled_event = {
+            "id": "evt_test_cancelled", "type": "customer.subscription.deleted",
+            "data": {"object": cancelled_subscription},
+        }
+        with patch.dict(api.os.environ, configured, clear=False):
+            cancelled = deliver(cancelled_event)
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(self.client.get("/me", headers=headers).json()["membership_tier"], "free")
+
+    def test_stripe_cancellation_does_not_remove_a_manual_founder_grant(self) -> None:
+        token = self.register("complimentary@example.com", "Complimentary Artist")
+        headers = {"Authorization": f"Bearer {token}"}
+        user_id = self.client.get("/me", headers=headers).json()["id"]
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            storage.update_membership_tier(user_id, "pro")
+            storage.upsert_billing_subscription(
+                user_id,
+                provider_customer_id="cus_old",
+                provider_subscription_id="sub_old",
+                plan="premium_monthly",
+                price_id="price_test_monthly",
+                status="canceled",
+                current_period_end=1_900_000_000,
+                cancel_at_period_end=False,
+            )
+            storage.update_stripe_membership(user_id, entitled=False)
+        finally:
+            storage.close()
+        self.assertEqual(self.client.get("/me", headers=headers).json()["membership_tier"], "pro")
 
     def test_cv_insights_are_a_premium_benefit(self) -> None:
         token = self.register("insights@example.com", "Insight Artist")

@@ -22,7 +22,7 @@ from urllib.request import Request, urlopen
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, Request as FastAPIRequest, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -30,6 +30,23 @@ from pydantic import BaseModel, EmailStr, Field
 from pwdlib import PasswordHash
 
 from artist_intelligence import analyse_artist, enrich_artist_dna
+from billing import (
+    BillingConfigurationError,
+    BillingProviderError,
+    BillingSignatureError,
+    SUPPORTED_PLANS,
+    cancel_subscription,
+    cancel_subscription_immediately,
+    create_checkout_session,
+    create_customer_portal_session,
+    plan_for_price,
+    plan_prices,
+    retrieve_subscription,
+    stripe_mode,
+    stripe_requests_enabled,
+    subscription_details,
+    verify_webhook,
+)
 from cv_headshot import extract_cv_headshot
 from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
@@ -145,6 +162,10 @@ class AdminMembershipUpdateRequest(BaseModel):
     membership_tier: str = Field(pattern="^(free|pro|school|admin)$")
 
 
+class CheckoutSessionRequest(BaseModel):
+    plan: str = Field(pattern="^(premium_monthly|audition_season)$")
+
+
 class ArtistDNARequest(BaseModel):
     artist_dna: dict[str, Any]
 
@@ -220,6 +241,69 @@ def _access_for_user(user: dict[str, Any]) -> dict[str, Any]:
             "improvement_plan": immediate_access,
         },
     }
+
+
+STRIPE_ENTITLED_STATUSES = frozenset({"active", "trialing", "past_due"})
+
+
+def _sync_stripe_subscription(
+    subscription: dict[str, Any], storage: StageVivaStorage, *, hinted_user_id: str = "",
+) -> dict[str, Any] | None:
+    """Persist one verified Stripe subscription and apply its entitlement."""
+    details = subscription_details(subscription)
+    user_id = (
+        hinted_user_id
+        or details["user_id"]
+        or storage.find_billing_user(
+            provider_customer_id=details["stripe_customer_id"],
+            provider_subscription_id=details["stripe_subscription_id"],
+        )
+        or ""
+    )
+    if not user_id or not storage.get_user(user_id):
+        logger.warning(
+            "Ignored Stripe subscription %s because no StageViva user could be identified",
+            details["stripe_subscription_id"],
+        )
+        return None
+    configured_plan = plan_for_price(details["price_id"])
+    entitled = details["status"] in STRIPE_ENTITLED_STATUSES and configured_plan is not None
+    saved = storage.upsert_billing_subscription(
+        user_id,
+        provider_customer_id=details["stripe_customer_id"],
+        provider_subscription_id=details["stripe_subscription_id"],
+        plan=configured_plan or "",
+        price_id=details["price_id"],
+        status=details["status"],
+        current_period_end=details["current_period_end"],
+        cancel_at_period_end=details["cancel_at_period_end"],
+    )
+    storage.update_stripe_membership(user_id, entitled=entitled)
+    if configured_plan is None:
+        logger.warning(
+            "Stripe subscription %s used an unrecognised price and received no access",
+            details["stripe_subscription_id"],
+        )
+    return saved
+
+
+def _cancel_billing_before_account_deletion(
+    user: dict[str, Any], storage: StageVivaStorage,
+) -> None:
+    billing = storage.get_billing_subscription_for_user(user["id"])
+    if not billing or billing["status"] not in STRIPE_ENTITLED_STATUSES:
+        return
+    subscription_id = str(billing.get("provider_subscription_id") or "")
+    if not subscription_id:
+        return
+    try:
+        cancel_subscription_immediately(subscription_id)
+    except (BillingConfigurationError, BillingProviderError) as error:
+        logger.exception("Could not cancel Stripe subscription before account deletion")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Your subscription could not be cancelled yet, so your account was not deleted. Please try again.",
+        ) from error
 
 
 def _cv_upload_limit_for_user(user: dict[str, Any]) -> int:
@@ -584,6 +668,136 @@ def get_my_access(user: CurrentUser, storage: Storage) -> dict[str, Any]:
     return access
 
 
+@app.get("/me/billing")
+def get_my_billing(user: CurrentUser, storage: Storage) -> dict[str, Any]:
+    """Return safe subscription state without exposing Stripe credentials."""
+    billing = storage.get_billing_subscription_for_user(user["id"])
+    configured_plans = {plan for plan, price in plan_prices().items() if price}
+    return {
+        "mode": stripe_mode(),
+        "checkout_available": stripe_requests_enabled() and configured_plans == SUPPORTED_PLANS,
+        "subscription": ({
+            "plan": billing.get("plan"),
+            "status": billing.get("status"),
+            "current_period_end": billing.get("current_period_end"),
+            "cancel_at_period_end": billing.get("cancel_at_period_end", False),
+            "can_manage": bool(billing.get("provider_customer_id")),
+        } if billing else None),
+    }
+
+
+@app.post("/billing/checkout")
+def start_billing_checkout(
+    payload: CheckoutSessionRequest, user: CurrentUser, storage: Storage,
+) -> dict[str, str]:
+    """Create a hosted Stripe Checkout without handling card data in StageViva."""
+    existing = storage.get_billing_subscription_for_user(user["id"])
+    if existing and existing["status"] in STRIPE_ENTITLED_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account already has an active StageViva subscription.",
+        )
+    try:
+        session = create_checkout_session(
+            user_id=user["id"],
+            email=user["email"],
+            plan=payload.plan,
+            stripe_customer_id=(str(existing.get("provider_customer_id") or "") if existing else None),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    except BillingConfigurationError as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+    except BillingProviderError as error:
+        logger.exception("Stripe Checkout creation failed")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    checkout_url = str(session.get("url") or "")
+    if not checkout_url.startswith("https://checkout.stripe.com/"):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Stripe returned an invalid checkout link.")
+    return {"checkout_url": checkout_url, "session_id": str(session.get("id") or "")}
+
+
+@app.post("/billing/portal")
+def open_billing_portal(user: CurrentUser, storage: Storage) -> dict[str, str]:
+    billing = storage.get_billing_subscription_for_user(user["id"])
+    customer_id = str(billing.get("provider_customer_id") or "") if billing else ""
+    if not customer_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No paid subscription found.")
+    try:
+        session = create_customer_portal_session(customer_id)
+    except (ValueError, BillingConfigurationError) as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+    except BillingProviderError as error:
+        logger.exception("Stripe customer portal creation failed")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    portal_url = str(session.get("url") or "")
+    if not portal_url.startswith("https://billing.stripe.com/"):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Stripe returned an invalid billing link.")
+    return {"portal_url": portal_url}
+
+
+@app.post("/billing/cancel")
+def schedule_billing_cancellation(user: CurrentUser, storage: Storage) -> dict[str, Any]:
+    """Keep access until the paid period ends, then let Stripe revoke it by webhook."""
+    billing = storage.get_billing_subscription_for_user(user["id"])
+    subscription_id = str(billing.get("provider_subscription_id") or "") if billing else ""
+    if not subscription_id or billing["status"] not in STRIPE_ENTITLED_STATUSES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active subscription found.")
+    try:
+        subscription = cancel_subscription(subscription_id)
+    except BillingConfigurationError as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+    except BillingProviderError as error:
+        logger.exception("Stripe subscription cancellation failed")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    saved = _sync_stripe_subscription(subscription, storage, hinted_user_id=user["id"])
+    return {
+        "status": saved["status"] if saved else billing["status"],
+        "cancel_at_period_end": bool(saved["cancel_at_period_end"] if saved else True),
+    }
+
+
+@app.post("/billing/webhook")
+async def stripe_billing_webhook(
+    request: FastAPIRequest,
+    storage: Storage,
+    stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
+) -> dict[str, bool]:
+    """Apply only signed, idempotent Stripe subscription events."""
+    payload = await request.body()
+    try:
+        event = verify_webhook(payload, stripe_signature or "")
+    except BillingConfigurationError as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+    except BillingSignatureError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    event_id = str(event["id"])
+    if storage.billing_event_processed(event_id):
+        return {"received": True}
+    event_type = str(event.get("type") or "")
+    event_object = event.get("data", {}).get("object", {})
+    if not isinstance(event_object, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Stripe event data is invalid.")
+    try:
+        if event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
+            _sync_stripe_subscription(event_object, storage)
+        elif event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
+            subscription_id = str(event_object.get("subscription") or "")
+            metadata = event_object.get("metadata") if isinstance(event_object.get("metadata"), dict) else {}
+            hinted_user_id = str(
+                event_object.get("client_reference_id") or metadata.get("stageviva_user_id") or ""
+            )
+            if subscription_id:
+                _sync_stripe_subscription(
+                    retrieve_subscription(subscription_id), storage, hinted_user_id=hinted_user_id,
+                )
+    except (BillingConfigurationError, BillingProviderError) as error:
+        logger.exception("Stripe webhook could not be completed")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+    storage.record_billing_event(event_id, event_type)
+    return {"received": True}
+
+
 def _require_premium_access(user: dict[str, Any]) -> None:
     if _membership_tier(user) not in {"admin", "pro", "school"}:
         raise HTTPException(
@@ -656,6 +870,7 @@ def update_profile(payload: ProfileRequest, user: CurrentUser, storage: Storage)
 @app.delete("/me/account")
 def delete_my_account(user: CurrentUser, storage: Storage) -> dict[str, bool]:
     """Let a performer permanently remove their own active account data."""
+    _cancel_billing_before_account_deletion(user, storage)
     try:
         _delete_private_uploads(user["id"])
     except OSError as error:
@@ -1550,6 +1765,7 @@ def admin_delete_performer(
     if _is_owner_email(target["email"]):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="The founder account cannot be deleted by an administrator.")
+    _cancel_billing_before_account_deletion(target, storage)
     try:
         _delete_private_uploads(user_id)
     except OSError as error:
