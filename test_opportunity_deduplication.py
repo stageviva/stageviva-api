@@ -22,6 +22,40 @@ def opportunity(title: str, *, description: str = "", official_url: str = "") ->
 
 
 class OpportunityDeduplicationTest(unittest.TestCase):
+    def test_restores_current_legacy_hidden_source_listing_but_preserves_manual_hide(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                rows = [
+                    (
+                        "legacy", "https://board.example/current", "Current listing", "Trusted Board",
+                        "dance", opportunity("Current listing"), 0, None,
+                    ),
+                    (
+                        "manual", "https://board.example/manual-hide", "Founder hidden", "Trusted Board",
+                        "dance", opportunity("Founder hidden"), 0, "manual",
+                    ),
+                ]
+                storage.connection.executemany("""
+                    INSERT INTO opportunities (
+                        id, listing_url, title, source_name, source_url, category,
+                        opportunity_json, visible, hidden_reason, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'https://board.example', ?, ?, ?, ?, 'now', 'now')
+                """, [
+                    (entry_id, url, title, source_name, category, __import__("json").dumps(data), visible, reason)
+                    for entry_id, url, title, source_name, category, data, visible, reason in rows
+                ])
+                storage.connection.commit()
+
+                self.assertEqual(storage.restore_current_legacy_hidden_opportunities(), 1)
+                visibility = {
+                    item["id"]: item["visible"] for item in storage.list_all_opportunities()
+                }
+                self.assertTrue(visibility["legacy"])
+                self.assertFalse(visibility["manual"])
+            finally:
+                storage.close()
+
     def test_same_official_url_hides_the_less_complete_repost(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             storage = StageVivaStorage(Path(directory) / "stageviva.db")

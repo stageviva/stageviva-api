@@ -69,6 +69,45 @@ class ApiTest(unittest.TestCase):
         removed = self.client.request("DELETE", "/me/push-subscriptions", headers=headers, json=subscription)
         self.assertEqual(removed.status_code, 204, removed.text)
 
+    def test_premium_feed_keeps_current_low_or_ineligible_matches_visible(self) -> None:
+        token = self.register("catalogue@example.com", "Catalogue Artist")
+        headers = {"Authorization": f"Bearer {token}"}
+        self.client.put("/me/artist-dna", headers=headers, json={
+            "artist_dna": {"identity": {"name": "Catalogue Artist"}},
+        })
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            user = storage.get_user_by_email("catalogue@example.com")
+            self.assertIsNotNone(user)
+            storage.update_membership_tier(user["id"], "pro")
+            opportunity = {
+                "identity": {
+                    "title": {"value": "Current trusted audition"},
+                    "organisation": {"value": "Trusted Company"},
+                    "opportunity_type": {"value": "Company contract"},
+                    "description": {"value": "A current professional opportunity."},
+                },
+                "location": {"city": {"value": "Paris"}, "country": {"value": "France"}},
+                "dates": {"application_deadline": {"value": "31 December 2099"}},
+            }
+            storage.connection.execute("""
+                INSERT INTO opportunities (
+                    id, listing_url, title, source_name, source_url, category,
+                    opportunity_json, visible, created_at, updated_at
+                ) VALUES ('current-low', 'https://trusted.example/current', 'Current trusted audition',
+                    'Trusted Source', 'https://trusted.example', 'dance', ?, 1, 'now', 'now')
+            """, (__import__("json").dumps(opportunity),))
+            storage.upsert_match(user["artist_id"], "current-low", {
+                "overall": {"match_score": 12, "match_level": "low", "recommendation": "not_recommended"},
+                "eligibility": {"status": "ineligible"},
+            })
+        finally:
+            storage.close()
+
+        matches = self.client.get("/matches", headers=headers)
+        self.assertEqual(matches.status_code, 200, matches.text)
+        self.assertEqual([item["opportunity_id"] for item in matches.json()], ["current-low"])
+
     def test_owner_can_moderate_and_add_manual_opportunities(self) -> None:
         token = self.register("owner@example.com", "StageViva Owner")
         headers = {"Authorization": f"Bearer {token}"}

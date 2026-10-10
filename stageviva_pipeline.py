@@ -131,7 +131,7 @@ def run_pipeline(
             )
             if not is_current_opportunity(opportunity):
                 if existing:
-                    storage.hide_opportunity(existing["id"])
+                    storage.hide_opportunity(existing["id"], reason="expired")
                 storage.reject_listing(item.listing_url, item.source_name, "expired")
                 skipped_expired += 1
                 continue

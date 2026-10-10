@@ -460,6 +460,9 @@ async def lifespan(_: FastAPI):
         seeded = seed_catalogue_if_empty(storage)
         if seeded:
             logger.info("Seeded %s validated opportunities for a new database", seeded)
+        restored = storage.restore_current_legacy_hidden_opportunities()
+        if restored:
+            logger.info("Restored %s current opportunities hidden by the legacy quality gate", restored)
         hidden = _hide_expired_opportunities(storage)
         if hidden:
             logger.info("Hidden %s expired opportunities from the live feed", hidden)
@@ -926,7 +929,7 @@ def _hide_expired_opportunities(storage: Storage) -> int:
             continue
         opportunity = item["opportunity"]
         if not is_current_opportunity(opportunity):
-            storage.hide_opportunity(item["id"])
+            storage.hide_opportunity(item["id"], reason="expired")
             hidden += 1
     return hidden
 
@@ -1380,8 +1383,7 @@ def list_matches(
     matches = _apply_current_location_guards(user, storage, storage.list_matches_for_user(user["id"]))
     matches = [
         item for item in matches
-        if (_is_actionable_match(item["match"])
-            and is_current_opportunity(item["opportunity"]))
+        if is_current_opportunity(item["opportunity"])
     ]
     return _present_matches_for_user(
         user, storage, matches, track=track, categories=selected_categories,
@@ -1395,8 +1397,7 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
     matches = _apply_current_location_guards(user, storage, storage.list_matches_for_user(user["id"]))
     matches = [
         item for item in matches
-        if (_is_actionable_match(item["match"])
-            and is_current_opportunity(item["opportunity"]))
+        if is_current_opportunity(item["opportunity"])
     ]
     return _present_matches_for_user(user, storage, matches, track=None, categories=set())
 
@@ -1407,7 +1408,7 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
     all_matches = _apply_current_location_guards(user, storage, storage.list_matches_for_user(user["id"]))
     released = _released_match_ids(user, storage, all_matches)
     for item in all_matches:
-        if (item["opportunity_id"] == opportunity_id and _is_actionable_match(item["match"])
+        if (item["opportunity_id"] == opportunity_id
                 and is_current_opportunity(item["opportunity"])):
             if not _is_immediate_access_user(user) and opportunity_id not in released:
                 raise HTTPException(

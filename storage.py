@@ -207,6 +207,11 @@ class StageVivaStorage:
         # default left behind by a prior deployment.
         self._ensure_column("users", "membership_tier", "TEXT NOT NULL DEFAULT 'free'")
         self._ensure_column("opportunities", "visible", "INTEGER NOT NULL DEFAULT 1")
+        # Record why a listing is hidden so automatic catalogue maintenance
+        # never restores something the founder deliberately removed.  Rows
+        # hidden before this column existed keep NULL and are handled once by
+        # ``restore_current_legacy_hidden_opportunities`` at startup.
+        self._ensure_column("opportunities", "hidden_reason", "TEXT")
         self.connection.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_auth_id
             ON users(external_auth_id) WHERE external_auth_id IS NOT NULL
@@ -262,13 +267,46 @@ class StageVivaStorage:
         """, (listing_url, source_name, reason, _utc_now()))
         self.connection.commit()
 
-    def hide_opportunity(self, opportunity_id: str) -> None:
+    def hide_opportunity(self, opportunity_id: str, reason: str = "manual") -> None:
         """Remove an ineligible listing from every user's feed without deleting history."""
         self.connection.execute(
-            "UPDATE opportunities SET visible = 0, updated_at = ? WHERE id = ?",
-            (_utc_now(), opportunity_id),
+            "UPDATE opportunities SET visible = 0, hidden_reason = ?, updated_at = ? WHERE id = ?",
+            (reason, _utc_now(), opportunity_id),
         )
         self.connection.commit()
+
+    def restore_current_legacy_hidden_opportunities(self) -> int:
+        """Publish current trusted-source rows hidden by the old quality gate.
+
+        Before ``hidden_reason`` existed, incomplete but valid listings and
+        intentional moderation shared the same ``visible = 0`` state.  Restore
+        legacy discovered listings once, then immediately run expiry and
+        deduplication maintenance.  Manually-created rows stay untouched and
+        all future founder hides are explicitly marked ``manual``.
+        """
+        from opportunity_lifecycle import is_current_opportunity
+
+        rows = self.connection.execute("""
+            SELECT id, category, source_name, opportunity_json
+            FROM opportunities
+            WHERE visible = 0 AND hidden_reason IS NULL
+        """).fetchall()
+        restored: list[str] = []
+        for row in rows:
+            category = str(row["category"] or "").lower()
+            source_name = str(row["source_name"] or "").lower()
+            if category == "manual" or "manual" in source_name:
+                continue
+            opportunity = json.loads(row["opportunity_json"])
+            if is_current_opportunity(opportunity):
+                restored.append(str(row["id"]))
+        if restored:
+            self.connection.executemany(
+                "UPDATE opportunities SET visible = 1, hidden_reason = NULL, updated_at = ? WHERE id = ?",
+                [(_utc_now(), opportunity_id) for opportunity_id in restored],
+            )
+            self.connection.commit()
+        return len(restored)
 
     def hide_duplicate_opportunities(self) -> int:
         """Hide repeated live listings, retaining the best populated version.
@@ -296,7 +334,7 @@ class StageVivaStorage:
                 duplicates.add(str(candidate["id"]))
         if duplicates:
             self.connection.executemany(
-                "UPDATE opportunities SET visible = 0, updated_at = ? WHERE id = ?",
+                "UPDATE opportunities SET visible = 0, hidden_reason = 'duplicate', updated_at = ? WHERE id = ?",
                 [(_utc_now(), opportunity_id) for opportunity_id in duplicates],
             )
             self.connection.commit()
@@ -304,8 +342,10 @@ class StageVivaStorage:
 
     def set_opportunity_visibility(self, opportunity_id: str, visible: bool) -> bool:
         cursor = self.connection.execute("""
-            UPDATE opportunities SET visible = ?, updated_at = ? WHERE id = ?
-        """, (int(visible), _utc_now(), opportunity_id))
+            UPDATE opportunities
+            SET visible = ?, hidden_reason = ?, updated_at = ?
+            WHERE id = ?
+        """, (int(visible), None if visible else "manual", _utc_now(), opportunity_id))
         self.connection.commit()
         return cursor.rowcount == 1
 
