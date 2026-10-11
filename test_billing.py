@@ -52,6 +52,25 @@ class BillingSafetyTest(unittest.TestCase):
             with self.assertRaises(billing.BillingConfigurationError):
                 billing._secret_key()
 
+    def test_restricted_live_key_is_accepted_in_live_mode(self) -> None:
+        configured = {
+            "STAGEVIVA_STRIPE_MODE": "live",
+            "STRIPE_SECRET_KEY": "rk_live_stageviva_restricted",
+        }
+        with patch.dict(os.environ, configured, clear=False):
+            self.assertEqual(
+                billing._secret_key(), "rk_live_stageviva_restricted",
+            )
+
+    def test_restricted_live_key_is_rejected_in_test_mode(self) -> None:
+        configured = {
+            "STAGEVIVA_STRIPE_MODE": "test",
+            "STRIPE_SECRET_KEY": "rk_live_must_not_be_used",
+        }
+        with patch.dict(os.environ, configured, clear=False):
+            with self.assertRaises(billing.BillingConfigurationError):
+                billing._secret_key()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -67,10 +67,13 @@ def _secret_key() -> str:
     key = os.getenv("STRIPE_SECRET_KEY", "").strip()
     if not key:
         raise BillingConfigurationError("Stripe has not been configured yet.")
-    expected_prefix = "sk_live_" if stripe_mode() == "live" else "sk_test_"
-    if not key.startswith(expected_prefix):
+    mode = stripe_mode()
+    expected_prefixes = (
+        ("sk_live_", "rk_live_") if mode == "live" else ("sk_test_", "rk_test_")
+    )
+    if not key.startswith(expected_prefixes):
         raise BillingConfigurationError(
-            f"The Stripe key does not match StageViva's {stripe_mode()} billing mode."
+            f"The Stripe key does not match StageViva's {mode} billing mode."
         )
     return key
 
