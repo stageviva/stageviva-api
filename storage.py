@@ -9,11 +9,12 @@ import os
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from opportunity_discovery import DiscoveredOpportunity
+from opportunity_lifecycle import opportunity_deadline
 
 
 def merge_opportunity_updates(opportunity: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
@@ -242,6 +243,20 @@ class StageVivaStorage:
                 opportunity_ids_json TEXT NOT NULL, created_at TEXT NOT NULL,
                 PRIMARY KEY (user_id, week_start)
             );
+            CREATE TABLE IF NOT EXISTS opportunity_tracking (
+                user_id TEXT NOT NULL, opportunity_id TEXT NOT NULL,
+                application_status TEXT NOT NULL DEFAULT 'saved',
+                reminder_days_json TEXT NOT NULL DEFAULT '[]',
+                audition_at TEXT, audition_location TEXT, notes TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, opportunity_id)
+            );
+            CREATE TABLE IF NOT EXISTS deadline_reminder_events (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, opportunity_id TEXT NOT NULL,
+                deadline TEXT NOT NULL, days_before INTEGER NOT NULL,
+                created_at TEXT NOT NULL, read_at TEXT,
+                UNIQUE (user_id, opportunity_id, deadline, days_before)
+            );
             CREATE TABLE IF NOT EXISTS billing_subscriptions (
                 user_id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL DEFAULT 'stripe',
@@ -274,6 +289,8 @@ class StageVivaStorage:
             );
             CREATE INDEX IF NOT EXISTS idx_cv_upload_events_user
             ON cv_upload_events (user_id);
+            CREATE INDEX IF NOT EXISTS idx_tracking_user
+            ON opportunity_tracking (user_id);
         """)
         self._ensure_column("notification_outbox", "read_at", "TEXT")
         self._ensure_column("notification_outbox", "email_sent_at", "TEXT")
@@ -338,6 +355,180 @@ class StageVivaStorage:
                 (refund_key,),
             )
         self.connection.commit()
+
+    def track_opportunity(
+        self, user_id: str, opportunity_id: str, *, application_status: str,
+        reminder_days: list[int], audition_at: str | None, audition_location: str | None,
+        notes: str | None,
+    ) -> dict[str, Any] | None:
+        opportunity = self.connection.execute(
+            "SELECT 1 FROM opportunities WHERE id = ? AND visible = 1", (opportunity_id,),
+        ).fetchone()
+        if not opportunity:
+            return None
+        previous = self.connection.execute(
+            "SELECT reminder_days_json FROM opportunity_tracking WHERE user_id = ? AND opportunity_id = ?",
+            (user_id, opportunity_id),
+        ).fetchone()
+        now = _utc_now()
+        self.connection.execute("""
+            INSERT INTO opportunity_tracking (
+                user_id, opportunity_id, application_status, reminder_days_json,
+                audition_at, audition_location, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, opportunity_id) DO UPDATE SET
+                application_status=excluded.application_status,
+                reminder_days_json=excluded.reminder_days_json,
+                audition_at=excluded.audition_at,
+                audition_location=excluded.audition_location,
+                notes=excluded.notes, updated_at=excluded.updated_at
+        """, (user_id, opportunity_id, application_status, json.dumps(reminder_days),
+              audition_at, audition_location, notes, now, now))
+        previous_days = set(json.loads(previous["reminder_days_json"])) if previous else set()
+        current_days = set(reminder_days)
+        if previous_days != current_days:
+            if current_days:
+                placeholders = ",".join("?" for _ in current_days)
+                self.connection.execute(
+                    f"""DELETE FROM deadline_reminder_events
+                        WHERE user_id = ? AND opportunity_id = ?
+                          AND days_before NOT IN ({placeholders})""",
+                    (user_id, opportunity_id, *sorted(current_days)),
+                )
+            else:
+                self.connection.execute(
+                    "DELETE FROM deadline_reminder_events WHERE user_id = ? AND opportunity_id = ?",
+                    (user_id, opportunity_id),
+                )
+        self.connection.commit()
+        return self.tracked_opportunity(user_id, opportunity_id)
+
+    def tracked_opportunity(self, user_id: str, opportunity_id: str) -> dict[str, Any] | None:
+        return next((item for item in self.list_tracked_opportunities(user_id)
+                     if item["opportunity_id"] == opportunity_id), None)
+
+    def list_tracked_opportunities(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("""
+            SELECT opportunity_tracking.*, opportunities.title, opportunities.listing_url,
+                   opportunities.opportunity_json, match_results.match_json
+            FROM opportunity_tracking
+            JOIN opportunities ON opportunities.id = opportunity_tracking.opportunity_id
+            LEFT JOIN users ON users.id = opportunity_tracking.user_id
+            LEFT JOIN match_results ON match_results.artist_id = users.artist_id
+                AND match_results.opportunity_id = opportunity_tracking.opportunity_id
+            WHERE opportunity_tracking.user_id = ?
+            ORDER BY opportunity_tracking.updated_at DESC
+        """, (user_id,)).fetchall()
+        return [{
+            **dict(row),
+            "reminder_days": json.loads(row["reminder_days_json"]),
+            "opportunity": json.loads(row["opportunity_json"]),
+            "match": json.loads(row["match_json"]) if row["match_json"] else {"overall": {}},
+        } for row in rows]
+
+    def untrack_opportunity(self, user_id: str, opportunity_id: str) -> bool:
+        cursor = self.connection.execute(
+            "DELETE FROM opportunity_tracking WHERE user_id = ? AND opportunity_id = ?",
+            (user_id, opportunity_id),
+        )
+        self.connection.execute(
+            "DELETE FROM deadline_reminder_events WHERE user_id = ? AND opportunity_id = ?",
+            (user_id, opportunity_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def materialize_due_deadline_reminders(self, today: date | None = None) -> int:
+        """Create each requested Premium reminder once; never create Basic reminders."""
+        today = today or date.today()
+        rows = self.connection.execute("""
+            SELECT opportunity_tracking.user_id, opportunity_tracking.opportunity_id,
+                   opportunity_tracking.reminder_days_json, opportunities.opportunity_json
+            FROM opportunity_tracking
+            JOIN opportunities ON opportunities.id = opportunity_tracking.opportunity_id
+            JOIN users ON users.id = opportunity_tracking.user_id
+            WHERE users.membership_tier IN ('pro', 'school', 'admin')
+              AND opportunities.visible = 1
+        """).fetchall()
+        created = 0
+        for row in rows:
+            opportunity = json.loads(row["opportunity_json"])
+            deadline = opportunity_deadline(opportunity)
+            if deadline is None:
+                continue
+            days_remaining = (deadline - today).days
+            requested = {int(value) for value in json.loads(row["reminder_days_json"])}
+            if days_remaining not in requested:
+                continue
+            reminder_id = _stable_id(
+                "deadline", f"{row['user_id']}:{row['opportunity_id']}:{deadline.isoformat()}:{days_remaining}",
+            )
+            cursor = self.connection.execute("""
+                INSERT OR IGNORE INTO deadline_reminder_events (
+                    id, user_id, opportunity_id, deadline, days_before, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (reminder_id, row["user_id"], row["opportunity_id"], deadline.isoformat(),
+                  days_remaining, _utc_now()))
+            created += cursor.rowcount
+        self.connection.commit()
+        return created
+
+    def list_deadline_reminders_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("""
+            SELECT deadline_reminder_events.*, opportunities.title, opportunities.listing_url
+            FROM deadline_reminder_events
+            JOIN opportunities ON opportunities.id = deadline_reminder_events.opportunity_id
+            WHERE deadline_reminder_events.user_id = ?
+            ORDER BY deadline_reminder_events.created_at DESC
+        """, (user_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_deadline_reminder_read(self, user_id: str, reminder_id: str) -> bool:
+        cursor = self.connection.execute("""
+            UPDATE deadline_reminder_events SET read_at = ? WHERE id = ? AND user_id = ?
+        """, (_utc_now(), reminder_id, user_id))
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def pending_deadline_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute("""
+            SELECT deadline_reminder_events.id AS notification_id,
+                   deadline_reminder_events.days_before, deadline_reminder_events.deadline,
+                   opportunities.id AS opportunity_id, opportunities.title,
+                   push_subscriptions.id AS subscription_id, push_subscriptions.endpoint,
+                   push_subscriptions.subscription_json
+            FROM deadline_reminder_events
+            JOIN users ON users.id = deadline_reminder_events.user_id
+            JOIN opportunities ON opportunities.id = deadline_reminder_events.opportunity_id
+            JOIN push_subscriptions ON push_subscriptions.user_id = users.id
+            LEFT JOIN push_deliveries ON push_deliveries.notification_id = deadline_reminder_events.id
+                AND push_deliveries.subscription_id = push_subscriptions.id
+            WHERE users.in_app_notifications = 1
+              AND users.membership_tier IN ('pro', 'school', 'admin')
+              AND push_deliveries.notification_id IS NULL
+            ORDER BY deadline_reminder_events.created_at ASC LIMIT ?
+        """, (limit,)).fetchall()
+        return [{**dict(row), "subscription": json.loads(row["subscription_json"])} for row in rows]
+
+    def pending_deadline_native_push_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute("""
+            SELECT deadline_reminder_events.id AS notification_id,
+                   deadline_reminder_events.days_before, deadline_reminder_events.deadline,
+                   opportunities.id AS opportunity_id, opportunities.title,
+                   native_push_tokens.id AS token_id, native_push_tokens.token,
+                   native_push_tokens.platform
+            FROM deadline_reminder_events
+            JOIN users ON users.id = deadline_reminder_events.user_id
+            JOIN opportunities ON opportunities.id = deadline_reminder_events.opportunity_id
+            JOIN native_push_tokens ON native_push_tokens.user_id = users.id
+            LEFT JOIN push_deliveries ON push_deliveries.notification_id = deadline_reminder_events.id
+                AND push_deliveries.subscription_id = native_push_tokens.id
+            WHERE users.in_app_notifications = 1
+              AND users.membership_tier IN ('pro', 'school', 'admin')
+              AND push_deliveries.notification_id IS NULL
+            ORDER BY deadline_reminder_events.created_at ASC LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(row) for row in rows]
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in self.connection.execute(f"PRAGMA table_info({table})")}
@@ -726,6 +917,8 @@ class StageVivaStorage:
         self.connection.execute("DELETE FROM cv_analysis_jobs WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM cv_upload_events WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM weekly_match_releases WHERE user_id = ?", (user_id,))
+        self.connection.execute("DELETE FROM opportunity_tracking WHERE user_id = ?", (user_id,))
+        self.connection.execute("DELETE FROM deadline_reminder_events WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM billing_subscriptions WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM push_subscriptions WHERE user_id = ?", (user_id,))
         if artist_id:

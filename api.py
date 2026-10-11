@@ -11,7 +11,7 @@ import mimetypes
 import shutil
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -24,7 +24,7 @@ import jwt
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, Request as FastAPIRequest, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
 from pwdlib import PasswordHash
@@ -64,11 +64,11 @@ from opportunity_intelligence import (
     OpportunityFetchError,
     analyse_opportunity,
 )
-from opportunity_lifecycle import is_current_opportunity
+from opportunity_lifecycle import is_current_opportunity, opportunity_deadline
 from opportunity_policy import is_school_or_training_opportunity
 from opportunity_presentation import (
     OPPORTUNITY_CATEGORIES, OPPORTUNITY_TRACKS, field_value, matches_for_filters,
-    opportunity_categories, opportunity_detail, opportunity_track,
+    opportunity_card, opportunity_categories, opportunity_detail, opportunity_track,
 )
 from push_notifications import deliver_pending_push_notifications, public_vapid_key, send_test_push_notification
 from source_registry import get_active_sources
@@ -132,6 +132,17 @@ class PushSubscriptionRequest(BaseModel):
 class NativePushTokenRequest(BaseModel):
     token: str = Field(min_length=16, max_length=512)
     platform: str = Field(default="ios", pattern="^ios$")
+
+
+class OpportunityTrackerRequest(BaseModel):
+    application_status: str | None = Field(
+        default=None,
+        pattern="^(saved|preparing|applied|audition_booked|callback|offer|not_selected|withdrawn)$",
+    )
+    reminder_days: list[int] | None = Field(default=None, max_length=3)
+    audition_at: str | None = Field(default=None, max_length=80)
+    audition_location: str | None = Field(default=None, max_length=300)
+    notes: str | None = Field(default=None, max_length=2000)
 
 
 class AdminOpportunityUpdateRequest(BaseModel):
@@ -1237,6 +1248,9 @@ def _run_daily_source_scan() -> None:
                 logger.info("Notification email delivery completed: %s", delivery)
             else:
                 logger.info("Notification emails are queued; Resend is not configured yet")
+            reminder_events = storage.materialize_due_deadline_reminders()
+            if reminder_events:
+                logger.info("Created %s deadline reminder events", reminder_events)
             push_delivery = deliver_pending_push_notifications(storage)
             logger.info("Push notification delivery completed: %s", push_delivery)
             native_push_delivery = deliver_pending_native_push_notifications(storage)
@@ -1659,6 +1673,25 @@ def trigger_daily_source_scan(
     return {"status": "started"}
 
 
+@app.post("/internal/daily-deadline-reminders")
+def trigger_daily_deadline_reminders(
+    storage: Storage,
+    scheduler_secret: Annotated[str | None, Header(alias="X-StageViva-Scheduler-Secret")] = None,
+) -> dict[str, Any]:
+    """Materialize and deliver requested Premium reminders without running AI."""
+    configured_secret = os.getenv("STAGEVIVA_SCHEDULER_SECRET")
+    if not configured_secret:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Scheduler is not configured.")
+    if not scheduler_secret or not hmac.compare_digest(scheduler_secret, configured_secret):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid scheduler credential.")
+    created = storage.materialize_due_deadline_reminders()
+    return {
+        "created": created,
+        "web": deliver_pending_push_notifications(storage),
+        "native": deliver_pending_native_push_notifications(storage),
+    }
+
+
 @app.get("/matches")
 def list_matches(
     user: CurrentUser,
@@ -2006,20 +2039,160 @@ def admin_add_opportunity(
     return {"id": opportunity_id, **match_result, "notification_delivery": delivery}
 
 
+def _tracked_opportunity_payload(item: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+    deadline = opportunity_deadline(item["opportunity"])
+    premium = _is_immediate_access_user(user)
+    return {
+        "opportunity_id": item["opportunity_id"],
+        "application_status": item["application_status"],
+        "reminder_days": item["reminder_days"],
+        "audition_at": item["audition_at"],
+        "audition_location": item["audition_location"],
+        "notes": item["notes"],
+        "saved_at": item["created_at"],
+        "updated_at": item["updated_at"],
+        "card": opportunity_card(item),
+        "deadline_date": deadline.isoformat() if deadline else None,
+        "premium_features": {
+            "reminders_locked": not premium,
+            "calendar_locked": not premium,
+            "deadline_supports_reminders": deadline is not None and deadline >= date.today(),
+        },
+    }
+
+
+@app.get("/me/opportunity-tracker")
+def list_tracked_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, Any]]:
+    """Return the performer's private saved/application workflow."""
+    return [_tracked_opportunity_payload(item, user) for item in storage.list_tracked_opportunities(user["id"])]
+
+
+@app.put("/me/opportunity-tracker/{opportunity_id}")
+def save_or_update_tracked_opportunity(
+    opportunity_id: str, payload: OpportunityTrackerRequest, user: CurrentUser, storage: Storage,
+) -> dict[str, Any]:
+    current = storage.tracked_opportunity(user["id"], opportunity_id)
+    fields = payload.model_fields_set
+    application_status = (
+        payload.application_status if "application_status" in fields and payload.application_status
+        else (current["application_status"] if current else "saved")
+    )
+    reminder_days = list(dict.fromkeys(
+        (payload.reminder_days or []) if "reminder_days" in fields
+        else (current["reminder_days"] if current else [])
+    ))
+    audition_at = (
+        payload.audition_at if "audition_at" in fields
+        else (current.get("audition_at") if current else None)
+    )
+    audition_location = (
+        payload.audition_location if "audition_location" in fields
+        else (current.get("audition_location") if current else None)
+    )
+    notes = payload.notes if "notes" in fields else (current.get("notes") if current else None)
+    if any(value not in {0, 2, 3} for value in reminder_days):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Choose deadline day, 2 days before, or 3 days before.")
+    uses_premium_tools = (
+        ("reminder_days" in fields and bool(reminder_days))
+        or ("audition_at" in fields and bool(audition_at))
+        or ("audition_location" in fields and bool(audition_location))
+    )
+    if uses_premium_tools and not _is_immediate_access_user(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={
+            "code": "premium_required",
+            "message": "Deadline reminders and calendar tools are included with StageViva Premium.",
+        })
+    if audition_at:
+        try:
+            datetime.fromisoformat(audition_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail="Use a valid audition date and time.") from error
+    existing = storage.get_opportunity_for_admin(opportunity_id)
+    if reminder_days and (not existing or opportunity_deadline(existing["opportunity"]) is None):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="This opportunity has no reliable deadline for reminders.")
+    if application_status in {"applied", "audition_booked", "callback", "offer", "not_selected", "withdrawn"}:
+        reminder_days = []
+    saved = storage.track_opportunity(
+        user["id"], opportunity_id, application_status=application_status,
+        reminder_days=reminder_days, audition_at=audition_at,
+        audition_location=(audition_location or "").strip() or None,
+        notes=(notes or "").strip() or None,
+    )
+    if not saved:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
+    return _tracked_opportunity_payload(saved, user)
+
+
+@app.delete("/me/opportunity-tracker/{opportunity_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_tracked_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) -> Response:
+    if not storage.untrack_opportunity(user["id"], opportunity_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Saved opportunity not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _ics_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+@app.get("/me/opportunity-tracker/{opportunity_id}/calendar.ics")
+def tracked_opportunity_calendar(
+    opportunity_id: str, user: CurrentUser, storage: Storage,
+) -> Response:
+    if not _is_immediate_access_user(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={
+            "code": "premium_required",
+            "message": "Calendar tools are included with StageViva Premium.",
+        })
+    item = storage.tracked_opportunity(user["id"], opportunity_id)
+    if not item or not item.get("audition_at"):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Add your booked audition date and time first.")
+    start = datetime.fromisoformat(str(item["audition_at"]).replace("Z", "+00:00"))
+    end = start + timedelta(hours=1)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    start_value = start.strftime("%Y%m%dT%H%M%S")
+    end_value = end.strftime("%Y%m%dT%H%M%S")
+    title = _ics_escape(f"StageViva audition — {item['title']}")
+    location = _ics_escape(str(item.get("audition_location") or ""))
+    notes = _ics_escape(str(item.get("notes") or ""))
+    calendar = "\r\n".join((
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//StageViva//Opportunity Tracker//EN",
+        "BEGIN:VEVENT", f"UID:stageviva-{user['id']}-{opportunity_id}", f"DTSTAMP:{stamp}",
+        f"DTSTART:{start_value}", f"DTEND:{end_value}", f"SUMMARY:{title}",
+        f"LOCATION:{location}", f"DESCRIPTION:{notes}", "END:VEVENT", "END:VCALENDAR", "",
+    ))
+    return Response(calendar, media_type="text/calendar; charset=utf-8", headers={
+        "Content-Disposition": 'attachment; filename="stageviva-audition.ics"',
+        "Cache-Control": "private, no-store",
+    })
+
+
 @app.get("/notifications")
 def list_notifications(user: CurrentUser, storage: Storage) -> list[dict[str, Any]]:
+    storage.materialize_due_deadline_reminders()
     notifications = [
         item for item in storage.list_notifications_for_user(user["id"])
         if _is_actionable_match(item["match"])
     ]
+    deadline_reminders = [{
+        "id": item["id"], "status": "deadline_reminder", "created_at": item["created_at"],
+        "read_at": item.get("read_at"), "opportunity_id": item["opportunity_id"],
+        "title": (f"{item['title']} closes today" if int(item["days_before"]) == 0
+                  else f"{item['title']} closes in {item['days_before']} days"),
+        "opportunity_title": item["title"], "locked": False, "kind": "deadline_reminder",
+    } for item in storage.list_deadline_reminders_for_user(user["id"])]
     if _is_immediate_access_user(user):
-        return notifications
+        return deadline_reminders + notifications
     return [_generic_basic_notification(item) for item in notifications]
 
 
 @app.post("/notifications/{notification_id}/read")
 def mark_notification_read(notification_id: str, user: CurrentUser, storage: Storage) -> dict[str, bool]:
-    if not storage.mark_notification_read(user["id"], notification_id):
+    if not (storage.mark_notification_read(user["id"], notification_id)
+            or storage.mark_deadline_reminder_read(user["id"], notification_id)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
     return {"ok": True}
 

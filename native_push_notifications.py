@@ -88,12 +88,13 @@ def _match_payload(
 def deliver_pending_native_push_notifications(storage: StageVivaStorage, *, limit: int = 100) -> dict[str, Any]:
     """Send every queued match once to each native iOS device that opted in."""
     pending = storage.pending_native_push_notifications(limit)
-    if not pending:
+    reminder_pending = storage.pending_deadline_native_push_notifications(limit)
+    if not pending and not reminder_pending:
         return {"configured": True, "pending": 0, "sent": 0, "removed": 0, "failures": []}
     try:
         _credentials()
     except NativePushConfigurationError as error:
-        return {"configured": False, "pending": len(pending), "sent": 0, "removed": 0, "failures": [str(error)]}
+        return {"configured": False, "pending": len(pending) + len(reminder_pending), "sent": 0, "removed": 0, "failures": [str(error)]}
 
     sent = removed = 0
     failures: list[str] = []
@@ -119,7 +120,28 @@ def deliver_pending_native_push_notifications(storage: StageVivaStorage, *, limi
             removed += 1
         else:
             failures.append(f"{item['token_id']}: {reason or 'delivery failed'}")
-    return {"configured": True, "pending": len(pending), "sent": sent, "removed": removed, "failures": failures}
+    for item in reminder_pending:
+        if item["platform"] != "ios":
+            continue
+        days = int(item["days_before"])
+        body = f"{item['title']} closes today." if days == 0 else f"{item['title']} closes in {days} days."
+        try:
+            delivered, reason = _send_apns(item["token"], {
+                "aps": {"alert": {"title": "StageViva deadline reminder", "body": body}, "sound": "default"},
+                "stageviva_path": "/my-opportunities",
+            })
+        except Exception as error:
+            failures.append(f"{item['token_id']}: {error}")
+            continue
+        if delivered:
+            storage.mark_push_delivered(item["notification_id"], item["token_id"])
+            sent += 1
+        elif reason and any(reason.endswith(f":{value}") for value in invalid_reasons):
+            storage.remove_native_push_token_by_id(item["token_id"])
+            removed += 1
+        else:
+            failures.append(f"{item['token_id']}: {reason or 'delivery failed'}")
+    return {"configured": True, "pending": len(pending) + len(reminder_pending), "sent": sent, "removed": removed, "failures": failures}
 
 
 def send_test_native_push_notification(storage: StageVivaStorage, user_id: str) -> dict[str, int]:

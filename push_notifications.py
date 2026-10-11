@@ -15,6 +15,7 @@ def deliver_pending_push_notifications(storage: StageVivaStorage, *, limit: int 
     """Deliver each new match once to every currently subscribed device."""
     private_key = storage.get_or_create_setting("web_push_vapid_private_key", _new_vapid_private_key)
     pending = storage.pending_push_notifications(limit)
+    reminder_pending = storage.pending_deadline_push_notifications(limit)
     sent = 0
     removed = 0
     failures: list[str] = []
@@ -45,7 +46,32 @@ def deliver_pending_push_notifications(storage: StageVivaStorage, *, limit: int 
                 removed += 1
             else:
                 failures.append(f"{item['notification_id']}: {error}")
-    return {"pending": len(pending), "sent": sent, "removed": removed, "failures": failures}
+    for item in reminder_pending:
+        days = int(item["days_before"])
+        body = (
+            f"{item['title']} closes today."
+            if days == 0 else f"{item['title']} closes in {days} days."
+        )
+        try:
+            webpush(
+                subscription_info=item["subscription"],
+                data=json.dumps({
+                    "title": "StageViva deadline reminder", "body": body,
+                    "url": "/my-opportunities", "tag": item["notification_id"],
+                }),
+                vapid_private_key=private_key,
+                vapid_claims={"sub": "mailto:hello@stageviva.com"},
+            )
+            storage.mark_push_delivered(item["notification_id"], item["subscription_id"])
+            sent += 1
+        except WebPushException as error:
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            if status_code in {404, 410}:
+                storage.remove_push_subscription_by_id(item["subscription_id"])
+                removed += 1
+            else:
+                failures.append(f"{item['notification_id']}: {error}")
+    return {"pending": len(pending) + len(reminder_pending), "sent": sent, "removed": removed, "failures": failures}
 
 
 def _new_vapid_private_key() -> str:

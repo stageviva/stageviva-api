@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,6 +34,31 @@ class ApiTest(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["access_token"]
+
+    def seed_tracker_opportunity(self, opportunity_id: str = "tracker-opportunity") -> str:
+        deadline = date.today() + timedelta(days=3)
+        opportunity = {
+            "identity": {
+                "title": {"value": "StageViva tracker audition"},
+                "organisation": {"value": "Example Dance Company"},
+                "opportunity_type": {"value": "Paid company contract"},
+            },
+            "location": {"city": {"value": "London"}, "country": {"value": "United Kingdom"}},
+            "dates": {"application_deadline": {"value": deadline.isoformat()}},
+        }
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            storage.connection.execute("""
+                INSERT INTO opportunities (
+                    id, listing_url, title, source_name, source_url, category,
+                    opportunity_json, visible, created_at, updated_at
+                ) VALUES (?, ?, ?, 'Trusted Source', 'https://example.test', 'dance', ?, 1, 'now', 'now')
+            """, (opportunity_id, f"https://example.test/{opportunity_id}",
+                  "StageViva tracker audition", json.dumps(opportunity)))
+            storage.connection.commit()
+        finally:
+            storage.close()
+        return opportunity_id
 
     def test_png_cv_upload_is_accepted(self) -> None:
         token = self.register("image-cv@example.com", "Image CV")
@@ -514,6 +540,86 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(access.status_code, 200, access.text)
         self.assertEqual(access.json()["opportunities"]["release"], "weekly_monday")
         self.assertFalse(access.json()["opportunities"]["show_company_or_role_before_release"])
+
+    def test_basic_user_can_save_and_track_but_premium_tools_are_locked(self) -> None:
+        token = self.register("tracker-basic@example.com", "Basic Tracker")
+        headers = {"Authorization": f"Bearer {token}"}
+        opportunity_id = self.seed_tracker_opportunity()
+
+        saved = self.client.put(
+            f"/me/opportunity-tracker/{opportunity_id}", headers=headers,
+            json={"application_status": "saved"},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertTrue(saved.json()["premium_features"]["reminders_locked"])
+        self.assertTrue(saved.json()["premium_features"]["calendar_locked"])
+
+        updated = self.client.put(
+            f"/me/opportunity-tracker/{opportunity_id}", headers=headers,
+            json={"application_status": "preparing", "notes": "Update my showreel."},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["application_status"], "preparing")
+        self.assertEqual(updated.json()["notes"], "Update my showreel.")
+
+        locked = self.client.put(
+            f"/me/opportunity-tracker/{opportunity_id}", headers=headers,
+            json={"reminder_days": [3, 2, 0]},
+        )
+        self.assertEqual(locked.status_code, 403, locked.text)
+        self.assertEqual(locked.json()["detail"]["code"], "premium_required")
+        self.assertEqual(self.client.get(
+            f"/me/opportunity-tracker/{opportunity_id}/calendar.ics", headers=headers,
+        ).status_code, 403)
+
+    def test_premium_user_gets_one_deadline_reminder_and_calendar(self) -> None:
+        token = self.register("tracker-premium@example.com", "Premium Tracker")
+        headers = {"Authorization": f"Bearer {token}"}
+        user_id = self.client.get("/me", headers=headers).json()["id"]
+        opportunity_id = self.seed_tracker_opportunity()
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            storage.update_membership_tier(user_id, "pro")
+        finally:
+            storage.close()
+
+        saved = self.client.put(
+            f"/me/opportunity-tracker/{opportunity_id}", headers=headers,
+            json={
+                "application_status": "saved", "reminder_days": [3, 2, 0],
+                "audition_at": "2099-01-10T10:30:00", "audition_location": "Studio 1",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertFalse(saved.json()["premium_features"]["reminders_locked"])
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            self.assertEqual(storage.materialize_due_deadline_reminders(date.today()), 1)
+            self.assertEqual(storage.materialize_due_deadline_reminders(date.today()), 0)
+            reminders = storage.list_deadline_reminders_for_user(user_id)
+            self.assertEqual(len(reminders), 1)
+            self.assertEqual(reminders[0]["days_before"], 3)
+        finally:
+            storage.close()
+
+        calendar = self.client.get(
+            f"/me/opportunity-tracker/{opportunity_id}/calendar.ics", headers=headers,
+        )
+        self.assertEqual(calendar.status_code, 200, calendar.text)
+        self.assertIn("BEGIN:VCALENDAR", calendar.text)
+        self.assertIn("Studio 1", calendar.text)
+
+        applied = self.client.put(
+            f"/me/opportunity-tracker/{opportunity_id}", headers=headers,
+            json={"application_status": "applied"},
+        )
+        self.assertEqual(applied.status_code, 200, applied.text)
+        self.assertEqual(applied.json()["reminder_days"], [])
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            self.assertEqual(storage.list_deadline_reminders_for_user(user_id), [])
+        finally:
+            storage.close()
 
 
 if __name__ == "__main__":
