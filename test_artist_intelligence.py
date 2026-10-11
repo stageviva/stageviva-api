@@ -5,7 +5,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from PIL import Image
+
 from artist_intelligence import (
+    ArtistAnalysisError,
     _cap_training_only_classical_ballet,
     _material_credit_lines,
     _normalise_artist_disciplines,
@@ -14,6 +17,22 @@ from artist_intelligence import (
 
 
 class ArtistDisciplineNormalisationTest(unittest.TestCase):
+    def test_png_cv_uses_local_ocr(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cv.png"
+            Image.new("RGB", (1200, 1600), "white").save(path)
+            with patch("pytesseract.image_to_string", return_value="Training\nRoyal Ballet School") as ocr:
+                text = extract_cv_text(str(path))
+            self.assertIn("Royal Ballet School", text)
+            ocr.assert_called_once()
+
+    def test_tiny_image_cv_is_rejected(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cv.jpg"
+            Image.new("RGB", (100, 100), "white").save(path)
+            with self.assertRaises(ArtistAnalysisError):
+                extract_cv_text(str(path))
+
     def test_shared_matching_vocabulary_is_used(self) -> None:
         artist = {
             "disciplines": [

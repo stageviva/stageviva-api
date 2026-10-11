@@ -34,6 +34,30 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["access_token"]
 
+    def test_png_cv_upload_is_accepted(self) -> None:
+        token = self.register("image-cv@example.com", "Image CV")
+        headers = {"Authorization": f"Bearer {token}"}
+        png = b"\x89PNG\r\n\x1a\n" + b"image-data"
+        with patch.object(api, "_analyse_uploaded_cv_in_background"):
+            response = self.client.post(
+                "/me/cv",
+                headers=headers,
+                files={"cv": ("cv.png", png, "image/png")},
+            )
+        self.assertEqual(response.status_code, 202)
+
+    def test_fake_jpeg_cv_is_rejected_without_using_allowance(self) -> None:
+        token = self.register("fake-image-cv@example.com", "Fake Image CV")
+        headers = {"Authorization": f"Bearer {token}"}
+        response = self.client.post(
+            "/me/cv",
+            headers=headers,
+            files={"cv": ("cv.jpg", b"not-a-jpeg", "image/jpeg")},
+        )
+        self.assertEqual(response.status_code, 400)
+        access = self.client.get("/me/access", headers=headers).json()
+        self.assertEqual(access["cv_uploads_used_this_month"], 0)
+
     def test_user_can_manage_their_private_performer_profile(self) -> None:
         token = self.register("artist@example.com", "Ava Artist")
         headers = {"Authorization": f"Bearer {token}"}

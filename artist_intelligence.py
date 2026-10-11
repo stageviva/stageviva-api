@@ -55,6 +55,8 @@ def extract_cv_text(
     - PDF
     - DOCX
     - TXT
+    - PNG
+    - JPEG
     """
 
     path = Path(file_path)
@@ -148,10 +150,61 @@ def extract_cv_text(
 
         return text[:max_characters]
 
+    # --------------------------------------------------------
+    # IMAGE (photo or screenshot of a CV)
+    # --------------------------------------------------------
+
+    if suffix in {".png", ".jpg", ".jpeg"}:
+        return _extract_image_text(path, max_characters)
+
     raise ArtistAnalysisError(
         f"Unsupported CV format: {suffix}. "
-        "Use PDF, DOCX or TXT."
+        "Use PDF, DOCX, TXT, PNG or JPEG."
     )
+
+
+def _extract_image_text(path: Path, max_characters: int) -> str:
+    """Read a photographed or screenshot CV locally with bounded OCR."""
+    try:
+        import pytesseract
+        from PIL import Image, ImageOps, UnidentifiedImageError
+    except ImportError as error:
+        raise ArtistAnalysisError(
+            "Image CV support is temporarily unavailable. Please upload a PDF or DOCX CV."
+        ) from error
+
+    try:
+        with Image.open(path) as source:
+            source.verify()
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source)
+            width, height = image.size
+            if width < 200 or height < 200:
+                raise ArtistAnalysisError(
+                    "This CV image is too small to read. Please upload a clearer photo or screenshot."
+                )
+            if width * height > 40_000_000:
+                raise ArtistAnalysisError(
+                    "This CV image is too large. Please reduce its resolution and try again."
+                )
+            image = ImageOps.autocontrast(image.convert("L"))
+            text = pytesseract.image_to_string(image, lang="eng").strip()
+    except ArtistAnalysisError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError) as error:
+        raise ArtistAnalysisError(
+            "This CV image could not be read. Please upload a valid PNG or JPEG image."
+        ) from error
+    except Exception as error:
+        raise ArtistAnalysisError(
+            "This CV image could not be analysed. Please upload a clearer photo or screenshot."
+        ) from error
+
+    if not text:
+        raise ArtistAnalysisError(
+            "We couldn't read any text in this CV image. Please upload a clearer photo or screenshot."
+        )
+    return text[:max_characters]
 
 
 def _extract_scanned_pdf_text(path: Path, max_characters: int) -> str:

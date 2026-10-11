@@ -1338,7 +1338,7 @@ def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
         if "No usable text could be extracted" in message:
             message = (
                 "We couldn't read any text in this CV. Please upload a DOCX, "
-                "a text-based PDF, or a clearer scanned PDF and try again."
+                "a text-based PDF, or a clearer scanned PDF, PNG or JPEG and try again."
             )
         storage.complete_cv_analysis(user_id, message)
     finally:
@@ -1526,11 +1526,18 @@ async def upload_cv(
     cv: UploadFile = File(...),
 ) -> dict[str, Any]:
     suffix = Path(cv.filename or "").suffix.lower()
-    if suffix not in {".pdf", ".docx", ".txt"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Upload a PDF, DOCX, or TXT CV.")
+    if suffix not in {".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Upload a PDF, DOCX, TXT, PNG, or JPEG CV.",
+        )
     content = await cv.read()
     if not content or len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CV must be between 1 byte and 10 MB.")
+    if suffix == ".png" and not content.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This is not a valid PNG image.")
+    if suffix in {".jpg", ".jpeg"} and not content.startswith(b"\xff\xd8\xff"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This is not a valid JPEG image.")
     # Keep an upload history for support and diagnostics, but never cap a
     # performer: a corrected or newer CV should always be analysable.
     limit = _cv_upload_limit_for_user(user)
@@ -1729,6 +1736,9 @@ def admin_get_performer_cv(user_id: str, owner: OwnerUser, storage: Storage) -> 
         ".pdf": "application/pdf",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ".txt": "text/plain; charset=utf-8",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
     }
     return FileResponse(
         cv_path,
