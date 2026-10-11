@@ -28,6 +28,7 @@ from opportunity_discovery import (
 from instagram_discovery import discover_instagram_source
 from opportunity_intelligence import DiscoveryContext, analyse_opportunity
 from opportunity_lifecycle import is_current_opportunity
+from opportunity_policy import is_school_or_training_opportunity
 from source_registry import Source, get_active_sources
 from storage import StageVivaStorage
 
@@ -134,6 +135,21 @@ def run_pipeline(
                     storage.hide_opportunity(existing["id"], reason="expired")
                 storage.reject_listing(item.listing_url, item.source_name, "expired")
                 skipped_expired += 1
+                continue
+            if is_school_or_training_opportunity(opportunity):
+                if existing:
+                    storage.hide_opportunity(existing["id"], reason="school_or_training")
+                storage.reject_listing(item.listing_url, item.source_name, "school_or_training")
+                skipped_ineligible += 1
+                continue
+            candidate = {
+                "id": existing["id"] if existing else "candidate", "listing_url": item.listing_url,
+                "title": item.title, "source_name": item.source_name, "visible": True,
+                "opportunity": opportunity,
+            }
+            if storage.duplicate_of(candidate, exclude_id=existing["id"] if existing else None):
+                storage.reject_listing(item.listing_url, item.source_name, "duplicate")
+                skipped_ineligible += 1
                 continue
             # Publish current opportunities even when a source has omitted
             # details or its official application link cannot yet be verified.

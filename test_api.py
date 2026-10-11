@@ -200,11 +200,29 @@ class ApiTest(unittest.TestCase):
                 "description": "Updated paid employment description.",
                 "official_url": "https://example.org/updated-audition",
                 "deadline": "1 January 2100",
+                "country": "United Kingdom",
+                "track": "apprenticeship",
+                "categories": ["ballet", "contemporary"],
             })
             self.assertEqual(details.status_code, 200, details.text)
             listing = self.client.get("/admin/opportunities", headers=headers).json()[0]
             self.assertEqual(listing["description"], "Updated paid employment description.")
             self.assertEqual(listing["official_url"], "https://example.org/updated-audition")
+            self.assertEqual(listing["country"], "United Kingdom")
+            self.assertEqual(listing["track"], "apprenticeship")
+            self.assertEqual(listing["categories"], ["ballet", "contemporary"])
+
+            school = self.client.post("/admin/opportunities", headers=headers, json={
+                "title": "Example Ballet School Summer Intensive",
+                "organisation": "Example Ballet School",
+                "role_summary": "Student admission",
+                "location": "London",
+                "deadline": "31 December 2099",
+                "official_url": "https://school.example/summer-course",
+                "contract_type": "Training course",
+                "description": "Apply for classes, tuition and a dance diploma.",
+            })
+            self.assertEqual(school.status_code, 422, school.text)
 
     def test_lovable_session_creates_and_reuses_one_stageviva_user(self) -> None:
         claims = {

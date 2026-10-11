@@ -9,6 +9,17 @@ from urllib.parse import urlparse
 _DIRECTORY_DOMAINS = frozenset({
     "balletplaces.com", "danceeurope.net", "ballee.co", "entertainersworldwidejobs.com", "allcasting.com",
 })
+OPPORTUNITY_TRACKS = frozenset({"contract", "agency", "apprenticeship"})
+OPPORTUNITY_CATEGORIES = frozenset({
+    "ballet", "contemporary", "jazz", "commercial", "hip_hop",
+    "musical_theatre", "tap", "cruise", "acting", "singing", "modelling",
+    "circus_acro", "agency", "performing_arts",
+})
+
+
+def _admin_overrides(opportunity: dict[str, Any]) -> dict[str, Any]:
+    value = opportunity.get("stageviva_admin", {})
+    return value if isinstance(value, dict) else {}
 
 
 def field_value(document: dict[str, Any], *path: str) -> str:
@@ -51,6 +62,11 @@ def _is_directory_url(url: str) -> bool:
 
 
 def opportunity_categories(opportunity: dict[str, Any]) -> list[str]:
+    override = _admin_overrides(opportunity).get("categories")
+    if isinstance(override, list):
+        selected = [str(value) for value in override if str(value) in OPPORTUNITY_CATEGORIES]
+        if selected:
+            return list(dict.fromkeys(selected))
     requirements = opportunity.get("requirements", {})
     discipline_requirements = requirements.get("discipline_requirements", {}) if isinstance(requirements, dict) else {}
     styles = _known_list(requirements, "styles")
@@ -91,6 +107,9 @@ def opportunity_categories(opportunity: dict[str, Any]) -> list[str]:
 
 
 def opportunity_track(opportunity: dict[str, Any]) -> str:
+    override = str(_admin_overrides(opportunity).get("track") or "")
+    if override in OPPORTUNITY_TRACKS:
+        return override
     text = " ".join((
         field_value(opportunity, "identity", "opportunity_type"),
         field_value(opportunity, "identity", "description"),

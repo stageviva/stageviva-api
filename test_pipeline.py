@@ -95,6 +95,28 @@ class PipelineTest(unittest.TestCase):
             finally:
                 storage.close()
 
+    def test_school_listing_is_rejected_and_never_matched(self) -> None:
+        source = Source("Test Source", "https://example.test/auditions", "ballet_dance")
+        item = DiscoveredOpportunity("Summer school", "https://example.test/summer-school", source.name, source.url, source.category)
+        school = {
+            "identity": {
+                "title": {"value": "Ballet School Summer Intensive"},
+                "opportunity_type": {"value": "Student admission"},
+                "description": {"value": "Training course with tuition and classes."},
+            },
+            "dates": {"application_deadline": {"value": "31 December 2099"}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                result = run_pipeline(source, [ARTIST], storage, discover=lambda _: [item],
+                    analyse=lambda _url, _context: school,
+                    match=lambda *_: self.fail("A school advert must not be matched"))
+                self.assertEqual(result.skipped_ineligible, 1)
+                self.assertEqual(storage.count("opportunities"), 0)
+            finally:
+                storage.close()
+
 
 if __name__ == "__main__":
     unittest.main()

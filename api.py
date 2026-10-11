@@ -65,10 +65,14 @@ from opportunity_intelligence import (
     analyse_opportunity,
 )
 from opportunity_lifecycle import is_current_opportunity
-from opportunity_presentation import field_value, matches_for_filters, opportunity_detail
+from opportunity_policy import is_school_or_training_opportunity
+from opportunity_presentation import (
+    OPPORTUNITY_CATEGORIES, OPPORTUNITY_TRACKS, field_value, matches_for_filters,
+    opportunity_categories, opportunity_detail, opportunity_track,
+)
 from push_notifications import deliver_pending_push_notifications, public_vapid_key, send_test_push_notification
 from source_registry import get_active_sources
-from storage import StageVivaStorage
+from storage import StageVivaStorage, merge_opportunity_updates
 
 load_dotenv()
 
@@ -139,6 +143,37 @@ class AdminOpportunityUpdateRequest(BaseModel):
     official_url: str | None = Field(default=None, min_length=8, max_length=2048)
     contract_type: str | None = Field(default=None, min_length=1, max_length=240)
     description: str | None = Field(default=None, max_length=3000)
+    country: str | None = Field(default=None, max_length=120)
+    venue: str | None = Field(default=None, max_length=300)
+    audition_locations: list[str] | None = None
+    remote_application: bool | None = None
+    published: str | None = Field(default=None, max_length=120)
+    audition_dates: list[str] | None = None
+    contract_start: str | None = Field(default=None, max_length=120)
+    contract_end: str | None = Field(default=None, max_length=120)
+    styles: list[str] | None = None
+    techniques: list[str] | None = None
+    experience_required_level: str | None = Field(default=None, max_length=240)
+    professional_experience_required: bool | None = None
+    roles_or_ranks: list[str] | None = None
+    age_requirement: str | None = Field(default=None, max_length=240)
+    height_requirement: str | None = Field(default=None, max_length=240)
+    gender_requirement: str | None = Field(default=None, max_length=240)
+    other_requirements: list[str] | None = None
+    languages: list[str] | None = None
+    work_rights_or_visa: str | None = Field(default=None, max_length=500)
+    duration: str | None = Field(default=None, max_length=240)
+    compensation: str | None = Field(default=None, max_length=500)
+    accommodation: str | None = Field(default=None, max_length=500)
+    travel: str | None = Field(default=None, max_length=500)
+    visa_support: str | None = Field(default=None, max_length=500)
+    application_method: str | None = Field(default=None, max_length=500)
+    application_email: str | None = Field(default=None, max_length=320)
+    application_materials: list[str] | None = None
+    audition_fee: str | None = Field(default=None, max_length=240)
+    track: str | None = Field(default=None, pattern="^(contract|agency|apprenticeship)$")
+    categories: list[str] | None = None
+    opportunity: dict[str, Any] | None = None
     visible: bool | None = None
 
 
@@ -151,6 +186,10 @@ class AdminManualOpportunityRequest(BaseModel):
     official_url: str = Field(min_length=8, max_length=2048)
     contract_type: str = Field(min_length=1, max_length=240)
     description: str = Field(default="", max_length=3000)
+    country: str = Field(default="unknown", max_length=120)
+    track: str = Field(default="contract", pattern="^(contract|agency|apprenticeship)$")
+    categories: list[str] = Field(default_factory=lambda: ["performing_arts"])
+    opportunity: dict[str, Any] | None = None
 
 
 class AdminOpportunityUrlRequest(BaseModel):
@@ -550,6 +589,9 @@ async def lifespan(_: FastAPI):
         hidden = _hide_expired_opportunities(storage)
         if hidden:
             logger.info("Hidden %s expired opportunities from the live feed", hidden)
+        schools = _hide_school_opportunities(storage)
+        if schools:
+            logger.info("Hidden %s school or general-training adverts from the live feed", schools)
         duplicates = storage.hide_duplicate_opportunities()
         if duplicates:
             logger.info("Hidden %s duplicate opportunities from the live feed", duplicates)
@@ -1153,6 +1195,16 @@ def _hide_expired_opportunities(storage: Storage) -> int:
     return hidden
 
 
+def _hide_school_opportunities(storage: Storage) -> int:
+    """Remove education adverts while retaining professional trainee roles."""
+    hidden = 0
+    for item in storage.list_all_opportunities():
+        if item["visible"] and is_school_or_training_opportunity(item["opportunity"]):
+            storage.hide_opportunity(item["id"], reason="school_or_training")
+            hidden += 1
+    return hidden
+
+
 def _run_daily_source_scan() -> None:
     """Run the live discovery pipeline on the web service's persistent data."""
     try:
@@ -1172,6 +1224,8 @@ def _run_daily_source_scan() -> None:
                 limit_per_source=limit,
                 total_analysis_limit=total_limit,
             )
+            _hide_expired_opportunities(storage)
+            _hide_school_opportunities(storage)
             duplicates = storage.hide_duplicate_opportunities()
             if duplicates:
                 logger.info("Hidden %s duplicate opportunities after source scan", duplicates)
@@ -1619,6 +1673,7 @@ def list_matches(
     matches = [
         item for item in matches
         if is_current_opportunity(item["opportunity"])
+        and not is_school_or_training_opportunity(item["opportunity"])
     ]
     return _present_matches_for_user(
         user, storage, matches, track=track, categories=selected_categories,
@@ -1633,6 +1688,7 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
     matches = [
         item for item in matches
         if is_current_opportunity(item["opportunity"])
+        and not is_school_or_training_opportunity(item["opportunity"])
     ]
     return _present_matches_for_user(user, storage, matches, track=None, categories=set())
 
@@ -1644,7 +1700,8 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
     released = _released_match_ids(user, storage, all_matches)
     for item in all_matches:
         if (item["opportunity_id"] == opportunity_id
-                and is_current_opportunity(item["opportunity"])):
+                and is_current_opportunity(item["opportunity"])
+                and not is_school_or_training_opportunity(item["opportunity"])):
             if not _is_immediate_access_user(user) and opportunity_id not in released:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -1670,12 +1727,44 @@ def _admin_opportunity_view(item: dict[str, Any]) -> dict[str, Any]:
         "listing_url": item["listing_url"],
         "contract_type": field_value(opportunity, "contract_and_compensation", "contract_type"),
         "description": field_value(opportunity, "identity", "description"),
+        "country": field_value(opportunity, "location", "country"),
+        "venue": field_value(opportunity, "location", "venue"),
+        "published": field_value(opportunity, "dates", "published"),
+        "contract_start": field_value(opportunity, "dates", "contract_start"),
+        "contract_end": field_value(opportunity, "dates", "contract_end"),
+        "duration": field_value(opportunity, "contract_and_compensation", "duration"),
+        "compensation": field_value(opportunity, "contract_and_compensation", "compensation"),
+        "accommodation": field_value(opportunity, "contract_and_compensation", "accommodation"),
+        "travel": field_value(opportunity, "contract_and_compensation", "travel"),
+        "visa_support": field_value(opportunity, "contract_and_compensation", "visa_support"),
+        "application_method": field_value(opportunity, "application", "method"),
+        "application_email": field_value(opportunity, "application", "email"),
+        "audition_fee": field_value(opportunity, "application", "audition_fee"),
+        "track": opportunity_track(opportunity),
+        "categories": opportunity_categories(opportunity),
+        "opportunity": opportunity,
         "source": item["source_name"],
         "visible": item["visible"],
+        "hidden_reason": item.get("hidden_reason"),
         "manual": item["category"] == "manual" or "manual" in item["source_name"].lower(),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
+
+
+def _validate_admin_opportunity(
+    opportunity: dict[str, Any], storage: StageVivaStorage, *, item: dict[str, Any], exclude_id: str | None = None,
+) -> None:
+    if not is_current_opportunity(opportunity):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="This opportunity has an expired deadline or audition date and cannot be published.")
+    if is_school_or_training_opportunity(opportunity):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="School, course and general training adverts cannot be published in StageViva.")
+    duplicate = storage.duplicate_of({**item, "opportunity": opportunity}, exclude_id=exclude_id)
+    if duplicate:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"This appears to duplicate {duplicate['title']} and cannot be published twice.")
 
 
 @app.get("/admin/opportunities")
@@ -1791,20 +1880,28 @@ def admin_update_opportunity(
     opportunity_id: str, payload: AdminOpportunityUpdateRequest, admin: AdminUser, storage: Storage,
 ) -> dict[str, Any]:
     changed = False
+    existing = storage.get_opportunity_for_admin(opportunity_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
     fields = {
-        key: value.strip()
+        key: value.strip() if isinstance(value, str) else value
         for key, value in payload.model_dump(exclude={"visible"}, exclude_none=True).items()
     }
+    if payload.categories is not None and any(value not in OPPORTUNITY_CATEGORIES for value in payload.categories):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="One or more opportunity filters are not supported.")
     if payload.official_url is not None and not payload.official_url.startswith(("https://", "http://")):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="Use the official http(s) listing URL.")
+    candidate = merge_opportunity_updates(existing["opportunity"], fields)
+    effective_visible = payload.visible if payload.visible is not None else existing["visible"]
+    if effective_visible:
+        _validate_admin_opportunity(candidate, storage, item=existing, exclude_id=opportunity_id)
     updated_opportunity = storage.update_opportunity_details(opportunity_id, fields) if fields else None
     if updated_opportunity is not None:
         changed = True
     if payload.visible is not None:
         changed = storage.set_opportunity_visibility(opportunity_id, payload.visible) or changed
-    if not changed and not any(item["id"] == opportunity_id for item in storage.list_all_opportunities()):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
     match_result = (
         _match_opportunity_against_registered_artists(opportunity_id, updated_opportunity, storage)
         if updated_opportunity is not None else {"matched_artists": 0, "queued_notifications": 0}
@@ -1842,7 +1939,14 @@ def admin_analyse_opportunity_url(
         or field_value(opportunity, "source", "official_url")
         or url
     )
-    return {
+    draft_item = {
+        "id": "draft", "title": field_value(opportunity, "identity", "title"),
+        "listing_url": url, "source_name": "StageViva creator URL", "source_url": url,
+        "category": "manual", "visible": False, "hidden_reason": None,
+        "created_at": None, "updated_at": None, "opportunity": opportunity,
+    }
+    result = _admin_opportunity_view(draft_item)
+    result.update({
         "title": field_value(opportunity, "identity", "title"),
         "organisation": field_value(opportunity, "identity", "organisation"),
         "role_summary": field_value(opportunity, "identity", "opportunity_type"),
@@ -1852,7 +1956,9 @@ def admin_analyse_opportunity_url(
         "contract_type": field_value(opportunity, "contract_and_compensation", "contract_type"),
         "description": field_value(opportunity, "identity", "description"),
         "opportunity": opportunity,
-    }
+        "can_publish": is_current_opportunity(opportunity) and not is_school_or_training_opportunity(opportunity),
+    })
+    return result
 
 
 @app.post("/admin/opportunities", status_code=status.HTTP_201_CREATED)
@@ -1862,26 +1968,38 @@ def admin_add_opportunity(
     if not payload.official_url.startswith(("https://", "http://")):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="Use the official http(s) listing URL.")
-    opportunity = {
+    opportunity = payload.opportunity or {
         "identity": {
             "title": {"value": payload.title.strip()},
             "organisation": {"value": payload.organisation.strip()},
             "opportunity_type": {"value": payload.role_summary.strip()},
             "description": {"value": payload.description.strip()},
         },
-        "location": {"city": {"value": payload.location.strip()}, "country": {"value": "unknown"}},
+        "location": {"city": {"value": payload.location.strip()}, "country": {"value": payload.country.strip()}},
         "dates": {"application_deadline": {"value": payload.deadline.strip()}, "audition_dates": {"value": []}},
         "contract_and_compensation": {"contract_type": {"value": payload.contract_type.strip()}},
         "application": {"application_url": {"value": payload.official_url.strip()}},
         "source": {"official_url": {"value": payload.official_url.strip()}},
     }
-    if not is_current_opportunity(opportunity):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail="This listing is no longer current.")
+    opportunity = merge_opportunity_updates(opportunity, {
+        "title": payload.title.strip(), "organisation": payload.organisation.strip(),
+        "role_summary": payload.role_summary.strip(), "location": payload.location.strip(),
+        "country": payload.country.strip(), "deadline": payload.deadline.strip(),
+        "official_url": payload.official_url.strip(), "contract_type": payload.contract_type.strip(),
+        "description": payload.description.strip(), "track": payload.track,
+        "categories": payload.categories,
+    })
     item = DiscoveredOpportunity(
         payload.title.strip(), payload.official_url.strip(), "StageViva manual review",
         payload.official_url.strip(), "manual", description=payload.description.strip(),
     )
+    if any(value not in OPPORTUNITY_CATEGORIES for value in payload.categories):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="One or more opportunity filters are not supported.")
+    _validate_admin_opportunity(opportunity, storage, item={
+        "id": "draft", "listing_url": payload.official_url.strip(), "title": payload.title.strip(),
+        "source_name": "StageViva manual review", "visible": True,
+    })
     opportunity_id = storage.upsert_opportunity(item, opportunity)
     match_result = _match_opportunity_against_registered_artists(opportunity_id, opportunity, storage)
     delivery = _deliver_queued_push_notifications(storage)

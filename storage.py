@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import os
 import re
@@ -13,6 +14,64 @@ from pathlib import Path
 from typing import Any, Callable
 
 from opportunity_discovery import DiscoveredOpportunity
+
+
+def merge_opportunity_updates(opportunity: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    """Apply the complete admin-editable field set without losing evidence metadata."""
+    result = copy.deepcopy(updates.get("opportunity") or opportunity)
+
+    def set_value(path: tuple[str, ...], value: Any) -> None:
+        target: dict[str, Any] = result
+        for key in path[:-1]:
+            child = target.get(key)
+            if not isinstance(child, dict):
+                child = {}
+                target[key] = child
+            target = child
+        field = target.get(path[-1])
+        if isinstance(field, dict) and "value" in field:
+            field["value"] = value
+        else:
+            target[path[-1]] = {"value": value}
+
+    paths = {
+        "title": ("identity", "title"), "organisation": ("identity", "organisation"),
+        "role_summary": ("identity", "opportunity_type"), "description": ("identity", "description"),
+        "country": ("location", "country"), "location": ("location", "city"),
+        "venue": ("location", "venue"), "audition_locations": ("location", "audition_locations"),
+        "remote_application": ("location", "remote_application"), "published": ("dates", "published"),
+        "deadline": ("dates", "application_deadline"), "audition_dates": ("dates", "audition_dates"),
+        "contract_start": ("dates", "contract_start"), "contract_end": ("dates", "contract_end"),
+        "styles": ("requirements", "styles"), "techniques": ("requirements", "techniques"),
+        "experience_required_level": ("requirements", "experience", "required_level"),
+        "professional_experience_required": ("requirements", "experience", "professional_experience_required"),
+        "roles_or_ranks": ("requirements", "experience", "roles_or_ranks"),
+        "age_requirement": ("requirements", "physical", "age_requirement"),
+        "height_requirement": ("requirements", "physical", "height_requirement"),
+        "gender_requirement": ("requirements", "physical", "gender_requirement"),
+        "other_requirements": ("requirements", "physical", "other_requirements"),
+        "languages": ("requirements", "languages"), "work_rights_or_visa": ("requirements", "work_rights_or_visa"),
+        "contract_type": ("contract_and_compensation", "contract_type"),
+        "duration": ("contract_and_compensation", "duration"),
+        "compensation": ("contract_and_compensation", "compensation"),
+        "accommodation": ("contract_and_compensation", "accommodation"),
+        "travel": ("contract_and_compensation", "travel"),
+        "visa_support": ("contract_and_compensation", "visa_support"),
+        "application_method": ("application", "method"), "official_url": ("application", "application_url"),
+        "application_email": ("application", "email"), "application_materials": ("application", "materials"),
+        "audition_fee": ("application", "audition_fee"),
+    }
+    for key, path in paths.items():
+        if key in updates:
+            set_value(path, updates[key])
+    if "official_url" in updates:
+        set_value(("source", "official_url"), updates["official_url"])
+    admin = result.setdefault("stageviva_admin", {})
+    if "track" in updates:
+        admin["track"] = updates["track"]
+    if "categories" in updates:
+        admin["categories"] = updates["categories"]
+    return result
 
 
 def _utc_now() -> str:
@@ -400,6 +459,13 @@ class StageVivaStorage:
         self.connection.commit()
         return cursor.rowcount == 1
 
+    def get_opportunity_for_admin(self, opportunity_id: str) -> dict[str, Any] | None:
+        return next((item for item in self.list_all_opportunities() if item["id"] == opportunity_id), None)
+
+    def duplicate_of(self, candidate: dict[str, Any], *, exclude_id: str | None = None) -> dict[str, Any] | None:
+        return next((item for item in self.list_all_opportunities()
+                     if item["visible"] and item["id"] != exclude_id and _same_live_opportunity(item, candidate)), None)
+
     def update_opportunity_title(self, opportunity_id: str, title: str) -> bool:
         row = self.connection.execute(
             "SELECT opportunity_json FROM opportunities WHERE id = ?", (opportunity_id,),
@@ -419,47 +485,15 @@ class StageVivaStorage:
         self.connection.commit()
         return True
 
-    def update_opportunity_details(self, opportunity_id: str, updates: dict[str, str]) -> dict[str, Any] | None:
+    def update_opportunity_details(self, opportunity_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update the editable editorial fields while retaining raw import history."""
         row = self.connection.execute(
             "SELECT opportunity_json FROM opportunities WHERE id = ?", (opportunity_id,),
         ).fetchone()
         if not row:
             return None
-        opportunity = json.loads(row["opportunity_json"])
-
-        def set_value(path: tuple[str, ...], value: str) -> None:
-            target: dict[str, Any] = opportunity
-            for key in path[:-1]:
-                child = target.get(key)
-                if not isinstance(child, dict):
-                    child = {}
-                    target[key] = child
-                target = child
-            field = target.get(path[-1])
-            if isinstance(field, dict):
-                field["value"] = value
-            else:
-                target[path[-1]] = {"value": value}
-
-        paths = {
-            "title": ("identity", "title"),
-            "organisation": ("identity", "organisation"),
-            "role_summary": ("identity", "opportunity_type"),
-            "description": ("identity", "description"),
-            "location": ("location", "city"),
-            "deadline": ("dates", "application_deadline"),
-            "contract_type": ("contract_and_compensation", "contract_type"),
-            "official_url": ("application", "application_url"),
-        }
-        for key, value in updates.items():
-            if key in paths:
-                set_value(paths[key], value)
-        if "official_url" in updates:
-            set_value(("source", "official_url"), updates["official_url"])
-        title = updates.get("title") or str(
-            opportunity.get("identity", {}).get("title", {}).get("value") or "Untitled opportunity"
-        )
+        opportunity = merge_opportunity_updates(json.loads(row["opportunity_json"]), updates)
+        title = updates.get("title") or _document_text(opportunity, "identity", "title") or "Untitled opportunity"
         self.connection.execute("""
             UPDATE opportunities SET title = ?, opportunity_json = ?, updated_at = ? WHERE id = ?
         """, (title, json.dumps(opportunity, ensure_ascii=False), _utc_now(), opportunity_id))
@@ -468,7 +502,7 @@ class StageVivaStorage:
 
     def list_all_opportunities(self) -> list[dict[str, Any]]:
         rows = self.connection.execute("""
-            SELECT id, listing_url, title, source_name, source_url, category, visible,
+            SELECT id, listing_url, title, source_name, source_url, category, visible, hidden_reason,
                    opportunity_json, created_at, updated_at
             FROM opportunities ORDER BY updated_at DESC
         """).fetchall()

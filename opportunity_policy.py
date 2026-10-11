@@ -48,8 +48,8 @@ def has_verified_official_application_url(opportunity: dict[str, Any], listing_u
     return any(_is_verified_public_url(candidate) for candidate in candidates)
 
 
-def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
-    """Allow paid work and genuine transition roles, never general study."""
+def is_school_or_training_opportunity(opportunity: dict[str, Any]) -> bool:
+    """Identify education adverts while preserving real company trainee roles."""
     text = " ".join((
         _value(opportunity, "identity", "title"),
         _value(opportunity, "identity", "opportunity_type"),
@@ -88,15 +88,37 @@ def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
         "conservatory", "masterclass", "workshop", "open class",
     )
     is_training = any(marker in text for marker in education_markers)
-    if is_training:
-        # A study provider sometimes calls an ordinary course a "trainee"
-        # programme. "Paid tuition" also does not make a course a job. Retain
-        # only explicit company or employment-transition wording.
-        professional_pathway_markers = (
-            *paid_work_markers, *qualifying_transition_markers,
-        )
-        if not any(marker in text for marker in professional_pathway_markers):
-            return False
+    professional_pathway_markers = (*paid_work_markers, *qualifying_transition_markers)
+    return is_training and not any(marker in text for marker in professional_pathway_markers)
+
+
+def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
+    """Allow paid work and genuine transition roles, never general study."""
+    if is_school_or_training_opportunity(opportunity):
+        return False
+    text = " ".join((
+        _value(opportunity, "identity", "title"),
+        _value(opportunity, "identity", "opportunity_type"),
+        _value(opportunity, "identity", "description"),
+        _value(opportunity, "contract_and_compensation", "contract_type"),
+        _value(opportunity, "contract_and_compensation", "compensation"),
+    )).lower()
+    paid_work_markers = (
+        "paid employment", "employment", "employment contract", "contract",
+        "company position", "company dancer", "company artist", "vacancy", "job",
+        "engagement", "professional contract", "touring contract", "cruise contract",
+        "paid casting", "paid role",
+    )
+    qualifying_transition_markers = (
+        "company trainee", "trainee company", "professional trainee",
+        "professional apprenticeship", "company apprenticeship", "young artist programme",
+        "young artist program", "graduate company", "pre-professional company",
+        "pre professional company", "paid graduate programme", "paid graduate program",
+    )
+    agency_markers = (
+        "talent representation", "agency representation", "talent agency",
+        "dance agency", "casting agency",
+    )
     # Unknown listings no longer pass by default. StageViva is a career feed,
     # so each listing must identify professional work, a qualifying transition
     # pathway, or an explicit professional-representation call.
