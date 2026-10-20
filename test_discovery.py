@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import requests
 
 from opportunity_discovery import (
+    SourceFetchError, fetch_page,
     discover_aida_casting, discover_allcasting, discover_ballee,
     discover_celebrity_cruises, discover_dance_europe,
     discover_entertainers_worldwide, discover_taylor_made_global,
 )
+
+
+class SourceFetchTest(unittest.TestCase):
+    def test_blocked_source_raises_an_error_without_exposing_url_credentials(self) -> None:
+        response = Mock(status_code=403)
+        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+        with patch("opportunity_discovery.requests.get", return_value=response):
+            with self.assertRaises(SourceFetchError) as raised:
+                fetch_page("https://example.test/jobs?access_token=private")
+        self.assertIn("HTTP 403", str(raised.exception))
+        self.assertNotIn("private", str(raised.exception))
 
 
 PAGE = """
@@ -34,6 +48,7 @@ class BalleeDiscoveryTest(unittest.TestCase):
     @patch("opportunity_discovery.fetch_page", return_value="""
         <a href='/auditions/example-company-audition'>Example Company Audition</a>
         <a href='/auditions/companies/a'>A</a>
+        <a href='/auditions/calendar'>Audition calendar</a>
         <a href='/auditions'>All auditions</a>
     """)
     def test_extracts_only_individual_audition_pages(self, _fetch) -> None:

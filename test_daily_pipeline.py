@@ -11,6 +11,43 @@ from storage import StageVivaStorage
 
 
 class DailyPipelineTest(unittest.TestCase):
+    def test_rejected_analyses_use_the_global_budget_and_next_run_rotates_sources(self) -> None:
+        sources = [Source(name, f"https://example.test/{name}", "dance", automation_ready=True)
+                   for name in ("First", "Second", "Third")]
+        seen = []
+
+        def runner(source, _artists, _storage, *, limit):
+            seen.append(source.name)
+            self.assertEqual(limit, 1)
+            return PipelineResult(5, 0, 0, 0, 0, 0, (), skipped_expired=1, analysis_attempts=1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                first = run_daily_pipeline(storage, sources=sources, runner=runner, total_analysis_limit=1)
+                self.assertEqual(first["analysis_attempts"], 1)
+                self.assertEqual(first["analysed"], 0)
+                run_daily_pipeline(storage, sources=sources, runner=runner, total_analysis_limit=1)
+                run_daily_pipeline(storage, sources=sources, runner=runner, total_analysis_limit=1)
+            finally:
+                storage.close()
+        self.assertEqual(seen, ["First", "Second", "Third"])
+
+    def test_item_failures_mark_the_source_run_as_failed(self) -> None:
+        source = Source("Partial", "https://example.test", "dance", automation_ready=True)
+
+        def runner(*_args, **_kwargs):
+            return PipelineResult(2, 1, 1, 0, 0, 0, ("One listing failed",), analysis_attempts=2)
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                result = run_daily_pipeline(storage, sources=[source], runner=runner)
+                self.assertEqual(result["runs"][0]["status"], "failed")
+                self.assertEqual(storage.list_source_runs()[0]["status"], "failed")
+            finally:
+                storage.close()
+
     def test_records_success_and_failure_without_stopping_other_sources(self) -> None:
         good = Source("Good", "https://example.test/good", "dance", automation_ready=True)
         bad = Source("Bad", "https://example.test/bad", "dance", automation_ready=True)

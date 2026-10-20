@@ -53,11 +53,15 @@ DEFAULT_HEADERS = {
 }
 
 
+class SourceFetchError(RuntimeError):
+    """A source could not be fetched; this is not an empty successful scan."""
+
+
 def fetch_page(url: str) -> Optional[str]:
     """
     Download a public webpage.
 
-    Returns HTML or None if the page cannot be retrieved.
+    Returns HTML, or raises a readable error if the source cannot be retrieved.
     """
 
     try:
@@ -72,8 +76,11 @@ def fetch_page(url: str) -> Optional[str]:
         return response.text
 
     except requests.RequestException as error:
-        print(f"[ERROR] Could not fetch {url}: {error}")
-        return None
+        response = getattr(error, "response", None)
+        code = getattr(response, "status_code", None)
+        reason = f"HTTP {code}" if code else type(error).__name__
+        host = urlparse(url).hostname or "source"
+        raise SourceFetchError(f"Could not fetch {host} ({reason}).") from error
 
 
 # ============================================================
@@ -327,7 +334,9 @@ def discover_ballee() -> List[DiscoveredOpportunity]:
         title = link.get_text(" ", strip=True)
         listing_url = urljoin(source.url, link["href"])
         path = urlparse(listing_url).path.rstrip("/")
-        if not title or not path.startswith("/auditions/") or path.startswith("/auditions/companies/"):
+        if (not title or not path.startswith("/auditions/")
+                or path.startswith("/auditions/companies/")
+                or path in {"/auditions/calendar", "/auditions/companies"}):
             continue
         results.append(DiscoveredOpportunity(
             title=title,

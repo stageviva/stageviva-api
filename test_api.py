@@ -8,11 +8,12 @@ import json
 import time
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
 import api
+from source_registry import Source
 
 
 class ApiTest(unittest.TestCase):
@@ -34,6 +35,23 @@ class ApiTest(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["access_token"]
+
+    def test_operations_reports_stale_runs_and_scan_configuration_without_secrets(self) -> None:
+        storage = Mock()
+        storage.list_source_runs.return_value = [{
+            "source_name": "Old source", "completed_at": "2020-01-01T00:00:00+00:00",
+            "status": "completed", "result": {"discovered": 3, "analysed": 1}, "error": None,
+        }]
+        with (
+            patch.object(api, "get_active_sources", return_value=[Source("Old source", "https://example.test", "dance")]),
+            patch.object(api, "list_database_backups", return_value=[]),
+            patch.dict(api.os.environ, {"STAGEVIVA_SOURCE_SCANS_ENABLED": "false"}),
+        ):
+            result = api.admin_operations({}, storage)
+        self.assertTrue(result["sources"][0]["stale"])
+        self.assertEqual(result["sources"][0]["status"], "warning")
+        self.assertFalse(result["configuration"]["source_scans_enabled"])
+        self.assertNotIn("ACCESS_TOKEN", json.dumps(result))
 
     def seed_tracker_opportunity(self, user_id: str, opportunity_id: str = "tracker-opportunity") -> str:
         deadline = date.today() + timedelta(days=3)

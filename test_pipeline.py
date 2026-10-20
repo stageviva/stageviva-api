@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from opportunity_discovery import DiscoveredOpportunity
 from source_registry import Source
@@ -22,6 +23,28 @@ MATCH = {"overall": {"match_score": 75, "match_level": "strong", "recommendation
 
 
 class PipelineTest(unittest.TestCase):
+    def test_analysis_budget_includes_rejections_and_failed_attempts(self) -> None:
+        source = Source("Test Source", "https://example.test", "dance")
+        items = [DiscoveredOpportunity(
+            f"Audition {index}", f"https://example.test/{index}", source.name, source.url, source.category,
+        ) for index in range(10)]
+        expired = {"dates": {"application_deadline": {"value": "1 January 2020"}}}
+        for outcome in (expired, RuntimeError("Provider unavailable")):
+            with self.subTest(outcome=type(outcome).__name__), tempfile.TemporaryDirectory() as directory:
+                storage = StageVivaStorage(Path(directory) / "stageviva.db")
+                analyse = Mock(side_effect=outcome) if isinstance(outcome, Exception) else Mock(return_value=outcome)
+                try:
+                    result = run_pipeline(
+                        source, [], storage, limit=2, discover=lambda _: items, analyse=analyse,
+                        match=lambda *_: self.fail("Rejected opportunities must not be matched"),
+                    )
+                    self.assertEqual(analyse.call_count, 2)
+                    self.assertEqual(result.analysis_attempts, 2)
+                    self.assertEqual(result.discovered, 10)
+                    self.assertEqual(result.stored_opportunities, 0)
+                finally:
+                    storage.close()
+
     def test_pipeline_stores_and_deduplicates_a_match_notification(self) -> None:
         source = Source("Test Source", "https://example.test/auditions", "ballet_dance")
         item = DiscoveredOpportunity("Test audition", "https://example.test/auditions/123", source.name, source.url, source.category)

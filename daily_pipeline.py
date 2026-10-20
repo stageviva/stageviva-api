@@ -29,13 +29,21 @@ def run_daily_pipeline(
 ) -> dict[str, object]:
     """Run tested sources with per-source and total AI-analysis safety caps."""
     selected_sources = list(sources if sources is not None else get_automated_sources())
+    # Small daily budgets must not permanently starve sources near the bottom
+    # of the registry. Scan the least recently attempted source first.
+    recent = storage.list_source_runs(limit=max(200, len(selected_sources) * 10))
+    latest: dict[str, str] = {}
+    for run in recent:
+        latest.setdefault(str(run["source_name"]), str(run["completed_at"]))
+    selected_sources.sort(key=lambda source: latest.get(source.name, ""))
     runs: list[dict[str, object]] = []
     total_analysed = 0
+    total_attempts = 0
     for source in selected_sources:
-        remaining = None if total_analysis_limit is None else total_analysis_limit - total_analysed
+        remaining = None if total_analysis_limit is None else total_analysis_limit - total_attempts
         if remaining is not None and remaining <= 0:
             break
-        started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        started_at = datetime.now(timezone.utc).isoformat()
         try:
             source_limit = limit_per_source
             if source.per_run_limit is not None:
@@ -48,9 +56,11 @@ def run_daily_pipeline(
                 source_limit = remaining if source_limit is None else min(source_limit, remaining)
             result = runner(source, None, storage, limit=source_limit)
             total_analysed += result.analysed
+            total_attempts += max(result.analysis_attempts, result.analysed)
             result_data = asdict(result)
-            storage.record_source_run(source.name, started_at, result_data)
-            runs.append({"source": source.name, "status": "completed", "result": result_data})
+            message = _safe_error_message(RuntimeError("; ".join(result.failures))) if result.failures else None
+            storage.record_source_run(source.name, started_at, result_data, error=message)
+            runs.append({"source": source.name, "status": "failed" if message else "completed", "result": result_data})
         except Exception as error:
             message = _safe_error_message(error)
             result_data = {"discovered": 0, "analysed": 0, "stored_opportunities": 0,
@@ -58,7 +68,8 @@ def run_daily_pipeline(
                            "skipped_existing": 0, "skipped_expired": 0, "failures": [message]}
             storage.record_source_run(source.name, started_at, result_data, error=message)
             runs.append({"source": source.name, "status": "failed", "error": message})
-    return {"sources_run": len(runs), "analysed": total_analysed, "runs": runs}
+    return {"sources_run": len(runs), "analysed": total_analysed,
+            "analysis_attempts": total_attempts, "runs": runs}
 
 
 def main() -> None:

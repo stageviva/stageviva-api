@@ -1821,6 +1821,12 @@ def admin_list_opportunities(admin: AdminUser, storage: Storage) -> list[dict[st
 @app.get("/admin/operations")
 def admin_operations(admin: AdminUser, storage: Storage) -> dict[str, Any]:
     """Owner-only operational status for the daily import and rolling backups."""
+    from instagram_discovery import instagram_is_configured
+
+    now = datetime.now(timezone.utc)
+    scans_enabled = os.getenv("STAGEVIVA_SOURCE_SCANS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    ai_enabled = os.getenv("STAGEVIVA_AI_REQUESTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    instagram_configured = instagram_is_configured()
     recent_runs = storage.list_source_runs(limit=200)
     latest_by_source: dict[str, dict[str, Any]] = {}
     for run in recent_runs:
@@ -1830,9 +1836,17 @@ def admin_operations(admin: AdminUser, storage: Storage) -> dict[str, Any]:
         latest = latest_by_source.get(source.name)
         result = latest.get("result", {}) if latest else {}
         status_label = "not_run" if latest is None else "healthy"
-        if latest and latest["status"] == "failed":
+        stale = False
+        if latest:
+            try:
+                completed = datetime.fromisoformat(str(latest["completed_at"]).replace("Z", "+00:00"))
+                completed = completed.replace(tzinfo=timezone.utc) if completed.tzinfo is None else completed
+                stale = now - completed > timedelta(days=7)
+            except (ValueError, TypeError):
+                stale = True
+        if latest and (latest["status"] == "failed" or result.get("failures")):
             status_label = "failed"
-        elif latest and int(result.get("discovered", 0) or 0) == 0:
+        elif latest and (stale or int(result.get("discovered", 0) or 0) == 0):
             status_label = "warning"
         source_health.append({
             "source": source.name,
@@ -1841,8 +1855,20 @@ def admin_operations(admin: AdminUser, storage: Storage) -> dict[str, Any]:
             "discovered": int(result.get("discovered", 0) or 0),
             "new_opportunities": int(result.get("stored_opportunities", 0) or 0),
             "error": latest.get("error") if latest else None,
+            "analysis_attempts": int(result.get("analysis_attempts", result.get("analysed", 0)) or 0),
+            "stale": stale,
+            "automation_ready": source.automation_ready,
+            "requires_instagram_configuration": source.source_type == "instagram" and not instagram_configured,
         })
-    return {"sources": source_health, "backups": list_database_backups(DATABASE_PATH)}
+    return {
+        "sources": source_health, "backups": list_database_backups(DATABASE_PATH),
+        "configuration": {
+            "source_scans_enabled": scans_enabled, "ai_requests_enabled": ai_enabled,
+            "instagram_configured": instagram_configured,
+            "daily_source_limit": os.getenv("STAGEVIVA_DAILY_SOURCE_LIMIT", "1"),
+            "daily_total_analysis_limit": os.getenv("STAGEVIVA_DAILY_TOTAL_ANALYSIS_LIMIT", "5"),
+        },
+    }
 
 
 @app.get("/admin/performers")

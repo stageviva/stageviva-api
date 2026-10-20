@@ -56,6 +56,7 @@ class PipelineResult:
     failures: tuple[str, ...]
     skipped_expired: int = 0
     skipped_ineligible: int = 0
+    analysis_attempts: int = 0
 
 
 def _discovery_context(item: DiscoveredOpportunity) -> DiscoveryContext:
@@ -107,13 +108,13 @@ def run_pipeline(
     items = discover(source)
 
     analysed = stored_opportunities = stored_matches = queued = skipped = skipped_expired = skipped_ineligible = 0
+    analysis_attempts = 0
     failures: list[str] = []
 
     for item in items:
-        # ``limit`` means newly analysed listings, never merely the first URLs
-        # returned by a source. Existing rows must not prevent the next new
-        # opportunity from being processed.
-        if limit is not None and analysed >= limit:
+        # Every analysis attempt consumes the budget, including expired,
+        # duplicate, school and failed listings. Already-seen URLs are free.
+        if limit is not None and analysis_attempts >= limit:
             break
 
         existing = storage.opportunity_by_listing_url(item.listing_url)
@@ -125,6 +126,7 @@ def run_pipeline(
             skipped += 1
             continue
         try:
+            analysis_attempts += 1
             opportunity = (
                 analyse_opportunity(item.listing_url, _discovery_context(item), listing_text=item.description)
                 if analyse is None
@@ -170,8 +172,9 @@ def run_pipeline(
             failures.append(f"{item.listing_url}: {error}")
 
     return PipelineResult(
-        analysed + skipped + skipped_expired + skipped_ineligible + len(failures), analysed, stored_opportunities,
+        len(items), analysed, stored_opportunities,
         stored_matches, queued, skipped, tuple(failures), skipped_expired, skipped_ineligible,
+        analysis_attempts,
     )
 
 
