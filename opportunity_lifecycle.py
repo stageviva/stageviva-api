@@ -22,6 +22,10 @@ def _parse_date(value: str) -> date | None:
     if not value or value.lower() == "unknown":
         return None
     try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        pass
+    try:
         return date_parser.parse(value, fuzzy=True, dayfirst=True).date()
     except (OverflowError, TypeError, ValueError):
         return None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 from storage import StageVivaStorage
@@ -15,7 +16,7 @@ def opportunity(title: str, *, description: str = "", official_url: str = "") ->
     return {
         "identity": {"title": field(title), "organisation": field("Unknown"), "description": field(description)},
         "location": {"city": field("Liverpool"), "country": field("United Kingdom")},
-        "dates": {"application_deadline": field("16 October 2026")},
+        "dates": {"application_deadline": field((date.today() + timedelta(days=30)).strftime("%d %B %Y"))},
         "application": {"application_url": field(official_url)},
         "source": {"official_url": field(official_url)},
     }

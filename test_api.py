@@ -35,7 +35,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["access_token"]
 
-    def seed_tracker_opportunity(self, opportunity_id: str = "tracker-opportunity") -> str:
+    def seed_tracker_opportunity(self, user_id: str, opportunity_id: str = "tracker-opportunity") -> str:
         deadline = date.today() + timedelta(days=3)
         opportunity = {
             "identity": {
@@ -56,6 +56,13 @@ class ApiTest(unittest.TestCase):
             """, (opportunity_id, f"https://example.test/{opportunity_id}",
                   "StageViva tracker audition", json.dumps(opportunity)))
             storage.connection.commit()
+            user = storage.get_user(user_id)
+            artist_id = user.get("artist_id") or storage.upsert_artist_for_user(
+                user_id, {"identity": {"name": "Tracker Artist"}},
+            )
+            storage.upsert_match(artist_id, opportunity_id, {
+                "overall": {"match_score": 80, "match_level": "high"},
+            })
         finally:
             storage.close()
         return opportunity_id
@@ -544,7 +551,8 @@ class ApiTest(unittest.TestCase):
     def test_basic_user_can_save_and_track_but_premium_tools_are_locked(self) -> None:
         token = self.register("tracker-basic@example.com", "Basic Tracker")
         headers = {"Authorization": f"Bearer {token}"}
-        opportunity_id = self.seed_tracker_opportunity()
+        user_id = self.client.get("/me", headers=headers).json()["id"]
+        opportunity_id = self.seed_tracker_opportunity(user_id)
 
         saved = self.client.put(
             f"/me/opportunity-tracker/{opportunity_id}", headers=headers,
@@ -576,7 +584,7 @@ class ApiTest(unittest.TestCase):
         token = self.register("tracker-premium@example.com", "Premium Tracker")
         headers = {"Authorization": f"Bearer {token}"}
         user_id = self.client.get("/me", headers=headers).json()["id"]
-        opportunity_id = self.seed_tracker_opportunity()
+        opportunity_id = self.seed_tracker_opportunity(user_id)
         storage = api.StageVivaStorage(api.DATABASE_PATH)
         try:
             storage.update_membership_tier(user_id, "pro")
@@ -620,6 +628,51 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(storage.list_deadline_reminders_for_user(user_id), [])
         finally:
             storage.close()
+
+
+    def test_existing_daily_cron_runs_reminders_without_enabling_ai_scans(self) -> None:
+        configured = {
+            "STAGEVIVA_SCHEDULER_SECRET": "test-scheduler-secret",
+            "STAGEVIVA_SOURCE_SCANS_ENABLED": "false",
+        }
+        with (
+            patch.dict(api.os.environ, configured, clear=False),
+            patch.object(api, "deliver_pending_push_notifications", return_value={"sent": 0}) as web,
+            patch.object(api, "deliver_pending_native_push_notifications", return_value={"sent": 0}) as native,
+            patch.object(api.threading, "Thread") as thread,
+        ):
+            response = self.client.post(
+                "/internal/daily-source-scan",
+                headers={"X-StageViva-Scheduler-Secret": "test-scheduler-secret"},
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["status"], "source_scan_disabled")
+        self.assertEqual(response.json()["reminders"]["created"], 0)
+        web.assert_called_once()
+        native.assert_called_once()
+        thread.assert_not_called()
+
+    def test_basic_cannot_save_an_unreleased_match_or_another_users_match(self) -> None:
+        token = self.register("locked-tracker@example.com", "Locked Tracker")
+        headers = {"Authorization": f"Bearer {token}"}
+        user_id = self.client.get("/me", headers=headers).json()["id"]
+        ids = [self.seed_tracker_opportunity(user_id, f"tracker-{index}") for index in range(4)]
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            released = storage.weekly_released_match_ids(user_id, api._weekly_release_start(), ids)
+        finally:
+            storage.close()
+        locked_id = next(value for value in ids if value not in released)
+        response = self.client.put(
+            f"/me/opportunity-tracker/{locked_id}", headers=headers, json={},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        other_token = self.register("other-tracker@example.com", "Other Tracker")
+        response = self.client.put(
+            f"/me/opportunity-tracker/{ids[0]}",
+            headers={"Authorization": f"Bearer {other_token}"}, json={},
+        )
+        self.assertEqual(response.status_code, 404, response.text)
 
 
 if __name__ == "__main__":

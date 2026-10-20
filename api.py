@@ -1653,7 +1653,7 @@ def get_cv_analysis(user: CurrentUser, storage: Storage) -> dict[str, Any]:
 @app.post("/internal/daily-source-scan", status_code=status.HTTP_202_ACCEPTED)
 def trigger_daily_source_scan(
     scheduler_secret: Annotated[str | None, Header(alias="X-StageViva-Scheduler-Secret")] = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Securely start the daily catalogue refresh from Render Cron."""
     configured_secret = os.getenv("STAGEVIVA_SCHEDULER_SECRET")
     if not configured_secret:
@@ -1664,8 +1664,20 @@ def trigger_daily_source_scan(
     # default so a scheduler cannot unexpectedly consume model credit.
     scans_enabled = os.getenv("STAGEVIVA_SOURCE_SCANS_ENABLED", "false").strip().lower()
     if scans_enabled not in {"1", "true", "yes", "on"}:
-        logger.warning("Daily source scan skipped because source scans are disabled")
-        return {"status": "disabled"}
+        logger.warning("Daily source scan skipped because source scans are disabled; running non-AI reminders only")
+        storage = StageVivaStorage(DATABASE_PATH)
+        try:
+            created = storage.materialize_due_deadline_reminders()
+            return {
+                "status": "source_scan_disabled",
+                "reminders": {
+                    "created": created,
+                    "web": deliver_pending_push_notifications(storage),
+                    "native": deliver_pending_native_push_notifications(storage),
+                },
+            }
+        finally:
+            storage.close()
     if not source_scan_lock.acquire(blocking=False):
         return {"status": "already_running"}
 
@@ -2072,6 +2084,10 @@ def save_or_update_tracked_opportunity(
     opportunity_id: str, payload: OpportunityTrackerRequest, user: CurrentUser, storage: Storage,
 ) -> dict[str, Any]:
     current = storage.tracked_opportunity(user["id"], opportunity_id)
+    if current is None:
+        # Reuse the recommendation's access check so a guessed ID cannot
+        # reveal an unreleased Basic match through the tracker response.
+        get_opportunity(opportunity_id, user, storage)
     fields = payload.model_fields_set
     application_status = (
         payload.application_status if "application_status" in fields and payload.application_status

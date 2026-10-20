@@ -1,10 +1,14 @@
 from datetime import date
 import unittest
 
-from opportunity_lifecycle import is_current_opportunity
+from opportunity_lifecycle import is_current_opportunity, opportunity_deadline
 
 
 class OpportunityLifecycleTest(unittest.TestCase):
+    def test_iso_deadline_keeps_month_and_day_in_the_correct_order(self) -> None:
+        opportunity = {"dates": {"application_deadline": {"value": "2026-11-02"}}}
+        self.assertEqual(opportunity_deadline(opportunity), date(2026, 11, 2))
+
     def test_rejects_when_all_explicit_dates_are_past(self) -> None:
         opportunity = {"dates": {"application_deadline": {"value": "1 September 2026"}, "audition_dates": {"value": ["2 September 2026"]}}}
         self.assertFalse(is_current_opportunity(opportunity, today=date(2026, 9, 3)))
