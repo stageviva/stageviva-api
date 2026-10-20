@@ -34,12 +34,15 @@ def _parse_date(value: str) -> date | None:
 def opportunity_deadline(opportunity: dict[str, Any]) -> date | None:
     """Return a usable application deadline for reminders and calendars."""
     deadline = _value(opportunity, "dates", "application_deadline", "value")
-    return _parse_date(deadline) if isinstance(deadline, str) else None
+    return _parse_date(deadline.split(";", 1)[0]) if isinstance(deadline, str) else None
 
 
 def is_current_opportunity(opportunity: dict[str, Any], today: date | None = None) -> bool:
     """Return false for expired deadlines, auditions and past season notices."""
     today = today or date.today()
+    deadline_date = opportunity_deadline(opportunity)
+    if deadline_date is not None and deadline_date < today:
+        return False
     candidates: list[str] = []
     deadline = _value(opportunity, "dates", "application_deadline", "value")
     if isinstance(deadline, str):

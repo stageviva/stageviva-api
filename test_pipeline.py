@@ -23,6 +23,22 @@ MATCH = {"overall": {"match_score": 75, "match_level": "strong", "recommendation
 
 
 class PipelineTest(unittest.TestCase):
+    def test_staff_vacancy_is_rejected_before_matching(self) -> None:
+        source = Source("Test", "https://example.test", "dance")
+        item = DiscoveredOpportunity("Dance Manager", "https://example.test/manager", source.name, source.url, source.category)
+        staff = {"identity": {"title": {"value": "Dance Manager"}, "opportunity_type": {"value": "employment"}}}
+        with tempfile.TemporaryDirectory() as directory:
+            storage = StageVivaStorage(Path(directory) / "stageviva.db")
+            try:
+                result = run_pipeline(source, [ARTIST], storage, discover=lambda _: [item],
+                                      analyse=lambda *_: staff,
+                                      match=lambda *_: self.fail("Staff vacancies must not be matched"))
+                self.assertEqual(result.skipped_ineligible, 1)
+                self.assertEqual(storage.count("opportunities"), 0)
+                self.assertTrue(storage.listing_seen(item.listing_url))
+            finally:
+                storage.close()
+
     def test_analysis_budget_includes_rejections_and_failed_attempts(self) -> None:
         source = Source("Test Source", "https://example.test", "dance")
         items = [DiscoveredOpportunity(

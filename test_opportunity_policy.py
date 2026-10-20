@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible
+from opportunity_policy import has_verified_official_application_url, is_stageviva_eligible, is_non_performer_opportunity
 
 
 def opportunity(*, opportunity_type: str, description: str = "", contract: str = "") -> dict:
@@ -19,6 +19,27 @@ def opportunity(*, opportunity_type: str, description: str = "", contract: str =
 
 
 class OpportunityPolicyTest(unittest.TestCase):
+    def test_excludes_management_teaching_and_backstage_job_titles(self) -> None:
+        for title in (
+            "DANCE MANAGER - OPERA BALLET VLAANDEREN", "THE ROYAL BALLET - REHEARSAL DIRECTOR",
+            "Artistic Director", "Stage Manager", "Ballet Teacher", "Vocal coach",
+            "Lighting technician", "Director, Educational Programming", "Deputy Head of School",
+        ):
+            with self.subTest(title=title):
+                item = opportunity(opportunity_type="employment", description="A paid contract.")
+                item["identity"]["title"] = {"value": title}
+                self.assertTrue(is_non_performer_opportunity(item))
+                self.assertFalse(is_stageviva_eligible(item))
+
+    def test_performing_roles_are_kept_when_the_description_mentions_directors(self) -> None:
+        for role in ("Company dancer", "Singer", "Model", "Actor", "Violinist", "Acrobat", "Dance captain"):
+            with self.subTest(role=role):
+                item = opportunity(
+                    opportunity_type=role,
+                    description="Paid performers work with our artistic director and rehearsal director.",
+                )
+                self.assertFalse(is_non_performer_opportunity(item))
+
     def test_excludes_school_and_training_admission(self) -> None:
         self.assertFalse(is_stageviva_eligible(opportunity(
             opportunity_type="Pre-vocational classical ballet training programme",

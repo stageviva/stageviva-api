@@ -5,6 +5,17 @@ from opportunity_lifecycle import is_current_opportunity, opportunity_deadline
 
 
 class OpportunityLifecycleTest(unittest.TestCase):
+    def test_past_application_deadline_is_closed_even_when_the_audition_is_in_the_future(self) -> None:
+        opportunity = {"dates": {
+            "application_deadline": {"value": "4 October 2026"},
+            "audition_dates": {"value": ["7 November 2026"]},
+        }}
+        self.assertFalse(is_current_opportunity(opportunity, today=date(2026, 10, 20)))
+
+    def test_deadline_with_a_source_note_is_still_checked(self) -> None:
+        opportunity = {"dates": {"application_deadline": {"value": "October 12, 2026; expires October 9, 2026"}}}
+        self.assertFalse(is_current_opportunity(opportunity, today=date(2026, 10, 20)))
+
     def test_iso_deadline_keeps_month_and_day_in_the_correct_order(self) -> None:
         opportunity = {"dates": {"application_deadline": {"value": "2026-11-02"}}}
         self.assertEqual(opportunity_deadline(opportunity), date(2026, 11, 2))

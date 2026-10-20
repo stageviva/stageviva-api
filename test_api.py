@@ -36,6 +36,27 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["access_token"]
 
+    def test_existing_staff_vacancy_is_removed_and_admin_cannot_publish_it(self) -> None:
+        token = self.register("staff-filter-owner@example.com", "Owner")
+        headers = {"Authorization": f"Bearer {token}"}
+        user_id = self.client.get("/me", headers=headers).json()["id"]
+        opportunity_id = self.seed_tracker_opportunity(user_id)
+        storage = api.StageVivaStorage(api.DATABASE_PATH)
+        try:
+            storage.update_opportunity_title(opportunity_id, "Dance Manager")
+            self.assertEqual(api._hide_non_performer_opportunities(storage), 1)
+            self.assertFalse(storage.get_opportunity_for_admin(opportunity_id)["visible"])
+        finally:
+            storage.close()
+        with patch.dict(api.os.environ, {"STAGEVIVA_ADMIN_EMAILS": "staff-filter-owner@example.com"}):
+            response = self.client.post("/admin/opportunities", headers=headers, json={
+                "title": "Rehearsal Director", "organisation": "Example Ballet", "role_summary": "Employment",
+                "location": "London", "deadline": "31 December 2099",
+                "official_url": "https://example.test/rehearsal-director", "contract_type": "Permanent employment",
+            })
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("performing", response.json()["detail"])
+
     def test_operations_reports_stale_runs_and_scan_configuration_without_secrets(self) -> None:
         storage = Mock()
         storage.list_source_runs.return_value = [{

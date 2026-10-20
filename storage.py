@@ -12,6 +12,7 @@ import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from opportunity_discovery import DiscoveredOpportunity
 from opportunity_lifecycle import opportunity_deadline
@@ -109,13 +110,27 @@ def _known_text(value: str) -> bool:
     return bool(value.strip()) and value.strip().lower() not in {"unknown", "not specified", "n/a"}
 
 
+def _generic_application_url(value: str) -> bool:
+    """Shared home, advert and login pages do not identify an individual role."""
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    path = parsed.path.rstrip("/").lower()
+    if not path:
+        return True
+    if host == "entertainersworldwide.com" and path == "/user/gigs.php" and not parsed.query:
+        return True
+    if host in {"facebook.com", "instagram.com"}:
+        return not any(part in path for part in ("/posts/", "/p/", "/reel/", "/reels/", "/videos/", "/permalink/"))
+    return False
+
+
 def _canonical_url(opportunity: dict[str, Any], fallback: str) -> str:
     for value in (
         _document_text(opportunity, "application", "application_url"),
         _document_text(opportunity, "source", "official_url"),
         fallback,
     ):
-        if value.startswith(("https://", "http://")):
+        if value.startswith(("https://", "http://")) and not _generic_application_url(value):
             return value.rstrip("/").lower()
     return ""
 
@@ -640,6 +655,35 @@ class StageVivaStorage:
             )
             self.connection.commit()
         return len(duplicates)
+
+    def restore_false_generic_url_duplicates(self) -> int:
+        """Recover current rows incorrectly merged through a shared generic link.
+
+        Manual hides and real duplicates stay hidden. Existing matches are
+        retained; this repair never calls AI or queues new notifications.
+        """
+        from opportunity_lifecycle import is_current_opportunity
+        from opportunity_policy import is_school_or_training_opportunity, is_non_performer_opportunity
+
+        restored = 0
+        for item in self.list_all_opportunities():
+            if item["visible"] or item.get("hidden_reason") != "duplicate":
+                continue
+            opportunity = item["opportunity"]
+            urls = (
+                _document_text(opportunity, "application", "application_url"),
+                _document_text(opportunity, "source", "official_url"),
+            )
+            if not any(url.startswith(("https://", "http://")) and _generic_application_url(url) for url in urls):
+                continue
+            if (not is_current_opportunity(opportunity)
+                    or is_school_or_training_opportunity(opportunity)
+                    or is_non_performer_opportunity(opportunity)
+                    or self.duplicate_of(item, exclude_id=item["id"])):
+                continue
+            self.set_opportunity_visibility(item["id"], True)
+            restored += 1
+        return restored
 
     def set_opportunity_visibility(self, opportunity_id: str, visible: bool) -> bool:
         cursor = self.connection.execute("""

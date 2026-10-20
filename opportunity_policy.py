@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 from urllib.parse import urlparse
+import re
 
 
 DIRECTORY_DOMAINS = frozenset({
@@ -92,9 +93,36 @@ def is_school_or_training_opportunity(opportunity: dict[str, Any]) -> bool:
     return is_training and not any(marker in text for marker in professional_pathway_markers)
 
 
+_NON_PERFORMER_ROLE = re.compile(
+    r"\b(?:"
+    r"(?:dance|rehearsal|artistic|creative|casting|music(?:al)?|production|technical|"
+    r"stage|company|tour|operations|project|education(?:al)?|programme?|marketing)\s+(?:manager|director)"
+    r"|(?:assistant|associate|deputy)\s+(?:director|manager)"
+    r"|director(?:\s+of\s+\w+)?|manager|head\s+of\s+(?:school|education|department)"
+    r"|(?:dance|ballet|singing|music|acting|drama|vocal)\s+(?:teacher|instructor|tutor|coach)"
+    r"|teacher|instructor|professor|lecturer|administrator|administrative\s+assistant"
+    r"|choreographer|photographer|videographer|stagehand|technician|costume\s+designer"
+    r"|lighting\s+designer|sound\s+engineer|makeup\s+artist|make\s+up\s+artist"
+    r")\b", re.IGNORECASE,
+)
+
+
+def is_non_performer_opportunity(opportunity: dict[str, Any]) -> bool:
+    """Exclude staff/teaching/backstage vacancies, based on the advertised role.
+
+    A performing audition may mention its choreographer or director in the
+    description. Those incidental references must never exclude the artists.
+    """
+    roles = (
+        _value(opportunity, "identity", "title"),
+        _value(opportunity, "identity", "opportunity_type"),
+    )
+    return any(_NON_PERFORMER_ROLE.search(re.sub(r"[-–—_/]+", " ", role)) for role in roles)
+
+
 def is_stageviva_eligible(opportunity: dict[str, Any]) -> bool:
     """Allow paid work and genuine transition roles, never general study."""
-    if is_school_or_training_opportunity(opportunity):
+    if is_school_or_training_opportunity(opportunity) or is_non_performer_opportunity(opportunity):
         return False
     text = " ".join((
         _value(opportunity, "identity", "title"),

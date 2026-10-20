@@ -28,7 +28,7 @@ from opportunity_discovery import (
 from instagram_discovery import discover_instagram_source
 from opportunity_intelligence import DiscoveryContext, analyse_opportunity
 from opportunity_lifecycle import is_current_opportunity
-from opportunity_policy import is_school_or_training_opportunity
+from opportunity_policy import is_school_or_training_opportunity, is_non_performer_opportunity
 from source_registry import Source, get_active_sources
 from storage import StageVivaStorage
 
@@ -142,6 +142,12 @@ def run_pipeline(
                 if existing:
                     storage.hide_opportunity(existing["id"], reason="school_or_training")
                 storage.reject_listing(item.listing_url, item.source_name, "school_or_training")
+                skipped_ineligible += 1
+                continue
+            if is_non_performer_opportunity(opportunity):
+                if existing:
+                    storage.hide_opportunity(existing["id"], reason="non_performer_role")
+                storage.reject_listing(item.listing_url, item.source_name, "non_performer_role")
                 skipped_ineligible += 1
                 continue
             candidate = {

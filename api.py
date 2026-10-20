@@ -65,7 +65,7 @@ from opportunity_intelligence import (
     analyse_opportunity,
 )
 from opportunity_lifecycle import is_current_opportunity, opportunity_deadline
-from opportunity_policy import is_school_or_training_opportunity
+from opportunity_policy import is_school_or_training_opportunity, is_non_performer_opportunity
 from opportunity_presentation import (
     OPPORTUNITY_CATEGORIES, OPPORTUNITY_TRACKS, field_value, matches_for_filters,
     opportunity_card, opportunity_categories, opportunity_detail, opportunity_track,
@@ -603,9 +603,13 @@ async def lifespan(_: FastAPI):
         schools = _hide_school_opportunities(storage)
         if schools:
             logger.info("Hidden %s school or general-training adverts from the live feed", schools)
+        _hide_non_performer_opportunities(storage)
         duplicates = storage.hide_duplicate_opportunities()
         if duplicates:
             logger.info("Hidden %s duplicate opportunities from the live feed", duplicates)
+        recovered_duplicates = storage.restore_false_generic_url_duplicates()
+        if recovered_duplicates:
+            logger.info("Restored %s distinct opportunities hidden through generic application links", recovered_duplicates)
         pending_users = storage.list_processing_cv_analyses()
         # The OCR release can repair existing image-only CVs once, including
         # the launch user's failed profile, without asking for another upload.
@@ -1216,8 +1220,18 @@ def _hide_school_opportunities(storage: Storage) -> int:
     return hidden
 
 
+def _hide_non_performer_opportunities(storage: Storage) -> int:
+    hidden = 0
+    for item in storage.list_all_opportunities():
+        if item["visible"] and is_non_performer_opportunity(item["opportunity"]):
+            storage.hide_opportunity(item["id"], reason="non_performer_role")
+            hidden += 1
+    return hidden
+
+
 def _run_daily_source_scan() -> None:
     """Run the live discovery pipeline on the web service's persistent data."""
+    logger = logging.getLogger("uvicorn.error")
     try:
         # Imported lazily to keep normal API boot lightweight.
         from daily_pipeline import run_daily_pipeline
@@ -1237,6 +1251,7 @@ def _run_daily_source_scan() -> None:
             )
             _hide_expired_opportunities(storage)
             _hide_school_opportunities(storage)
+            _hide_non_performer_opportunities(storage)
             duplicates = storage.hide_duplicate_opportunities()
             if duplicates:
                 logger.info("Hidden %s duplicate opportunities after source scan", duplicates)
@@ -1719,6 +1734,7 @@ def list_matches(
         item for item in matches
         if is_current_opportunity(item["opportunity"])
         and not is_school_or_training_opportunity(item["opportunity"])
+        and not is_non_performer_opportunity(item["opportunity"])
     ]
     return _present_matches_for_user(
         user, storage, matches, track=track, categories=selected_categories,
@@ -1734,6 +1750,7 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
         item for item in matches
         if is_current_opportunity(item["opportunity"])
         and not is_school_or_training_opportunity(item["opportunity"])
+        and not is_non_performer_opportunity(item["opportunity"])
     ]
     return _present_matches_for_user(user, storage, matches, track=None, categories=set())
 
@@ -1746,7 +1763,8 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
     for item in all_matches:
         if (item["opportunity_id"] == opportunity_id
                 and is_current_opportunity(item["opportunity"])
-                and not is_school_or_training_opportunity(item["opportunity"])):
+                and not is_school_or_training_opportunity(item["opportunity"])
+                and not is_non_performer_opportunity(item["opportunity"])):
             if not _is_immediate_access_user(user) and opportunity_id not in released:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -1800,6 +1818,9 @@ def _admin_opportunity_view(item: dict[str, Any]) -> dict[str, Any]:
 def _validate_admin_opportunity(
     opportunity: dict[str, Any], storage: StageVivaStorage, *, item: dict[str, Any], exclude_id: str | None = None,
 ) -> None:
+    if is_non_performer_opportunity(opportunity):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="StageViva only lists performing and modelling roles, not management, teaching or backstage vacancies.")
     if not is_current_opportunity(opportunity):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="This opportunity has an expired deadline or audition date and cannot be published.")
@@ -2027,7 +2048,9 @@ def admin_analyse_opportunity_url(
         "contract_type": field_value(opportunity, "contract_and_compensation", "contract_type"),
         "description": field_value(opportunity, "identity", "description"),
         "opportunity": opportunity,
-        "can_publish": is_current_opportunity(opportunity) and not is_school_or_training_opportunity(opportunity),
+        "can_publish": (is_current_opportunity(opportunity)
+                        and not is_school_or_training_opportunity(opportunity)
+                        and not is_non_performer_opportunity(opportunity)),
     })
     return result
 
