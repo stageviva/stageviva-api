@@ -10,6 +10,7 @@ import json
 import mimetypes
 import shutil
 import threading
+import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -384,8 +385,10 @@ def _weekly_release_start() -> str:
 def _released_match_ids(user: dict[str, Any], storage: StageVivaStorage, matches: list[dict[str, Any]]) -> set[str]:
     if _is_immediate_access_user(user):
         return {str(item["opportunity_id"]) for item in matches}
+    job = storage.get_cv_analysis(user["id"])
     return storage.weekly_released_match_ids(
         user["id"], _weekly_release_start(), [str(item["opportunity_id"]) for item in matches],
+        finalize=not job or job["status"] not in {"processing", "matching"},
     )
 
 
@@ -610,6 +613,7 @@ async def lifespan(_: FastAPI):
         recovered_duplicates = storage.restore_false_generic_url_duplicates()
         if recovered_duplicates:
             logger.info("Restored %s distinct opportunities hidden through generic application links", recovered_duplicates)
+        matching_users = storage.list_matching_cv_analyses()
         pending_users = storage.list_processing_cv_analyses()
         # The OCR release can repair existing image-only CVs once, including
         # the launch user's failed profile, without asking for another upload.
@@ -626,6 +630,9 @@ async def lifespan(_: FastAPI):
                 target=_analyse_uploaded_cv_in_background,
                 args=(user_id, str(files[0])), daemon=True,
             ).start()
+    for user_id in matching_users:
+        # Resume only the unfinished matching phase, never reanalyse the CV.
+        threading.Thread(target=_finish_uploaded_cv_matches, args=(user_id,), daemon=True).start()
     # Headshot extraction was introduced after some beta CVs had already been
     # analysed. Backfill those private uploads once, without asking anyone to
     # re-upload their CV.
@@ -1083,7 +1090,7 @@ def get_profile_questions(user: CurrentUser, storage: Storage) -> dict[str, Any]
 def _match_artist_against_catalogue(
     artist_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage,
 ) -> dict[str, int]:
-    matched = queued = 0
+    matched = queued = failed = 0
     refresh_limit = max(1, int(os.getenv("STAGEVIVA_MAX_MATCHES_PER_REFRESH", "20")))
     opportunities = storage.list_opportunity_dnas(limit=refresh_limit)
 
@@ -1100,6 +1107,7 @@ def _match_artist_against_catalogue(
             try:
                 results[opportunity_id] = future.result()
             except Exception:
+                failed += 1
                 logger.exception("Matching failed for opportunity %s", opportunity_id)
 
     for opportunity_id, _ in opportunities:
@@ -1110,7 +1118,7 @@ def _match_artist_against_catalogue(
         matched += 1
         if _is_actionable_match(result) and result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
             queued += int(storage.queue_notification(artist_id, opportunity_id, result))
-    return {"matched_opportunities": matched, "queued_notifications": queued}
+    return {"matched_opportunities": matched, "queued_notifications": queued, "failed_matches": failed}
 
 
 def _match_opportunity_against_registered_artists(
@@ -1410,8 +1418,8 @@ def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
         if found_new_headshot or _available_headshot_path(user_id):
             _set_cv_headshot_available(user_id, artist_dna)
         _mark_headshot_checked(user_id)
-        _store_and_match_artist(user_id, artist_dna, storage)
-        storage.complete_cv_analysis(user_id)
+        storage.upsert_artist_for_user(user_id, artist_dna)
+        storage.mark_cv_profile_ready(user_id)
     except Exception as error:
         logger.exception("CV analysis failed for user %s", user_id)
         # A failed analysis is not a usable upload and must never reduce the
@@ -1424,6 +1432,28 @@ def _analyse_uploaded_cv_in_background(user_id: str, cv_path: str) -> None:
                 "a text-based PDF, or a clearer scanned PDF, PNG or JPEG and try again."
             )
         storage.complete_cv_analysis(user_id, message)
+        return
+    finally:
+        storage.close()
+    _finish_uploaded_cv_matches(user_id)
+
+
+def _finish_uploaded_cv_matches(user_id: str) -> None:
+    """Matching failures never invalidate a successfully extracted CV/profile."""
+    storage = StageVivaStorage(DATABASE_PATH)
+    try:
+        job = storage.get_cv_analysis(user_id)
+        if not job or job["status"] != "matching":
+            return
+        artist = storage.get_artist_for_user(user_id)
+        if not artist:
+            storage.complete_cv_matching(user_id, failed=True)
+            return
+        result = _match_artist_against_catalogue(artist["id"], artist["dna"], storage)
+        storage.complete_cv_matching(user_id, failed=bool(result.get("failed_matches")))
+    except Exception:
+        logger.exception("Post-CV matching failed for user %s", user_id)
+        storage.complete_cv_matching(user_id, failed=True)
     finally:
         storage.close()
 
@@ -1621,24 +1651,39 @@ async def upload_cv(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This is not a valid PNG image.")
     if suffix in {".jpg", ".jpeg"} and not content.startswith(b"\xff\xd8\xff"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This is not a valid JPEG image.")
-    # Keep an upload history for support and diagnostics, but never cap a
-    # performer: a corrected or newer CV should always be analysable.
     limit = _cv_upload_limit_for_user(user)
-    reserved, used = storage.reserve_cv_upload_this_month(user["id"], limit)
-    if not reserved:
+    user_directory = UPLOADS_DIR / user["id"]
+    cv_path = user_directory / f"cv{suffix}"
+
+    def save_upload() -> None:
+        user_directory.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=user_directory, prefix=".cv-", delete=False) as output:
+                temporary = Path(output.name)
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            _headshot_check_marker(user["id"]).unlink(missing_ok=True)
+            temporary.replace(cv_path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    try:
+        outcome, used, job = storage.claim_cv_upload_this_month(user["id"], limit, save_upload)
+    except OSError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="We couldn't save your CV. Your upload allowance hasn't been used. Please try again.",
+        ) from None
+    if outcome == "limit":
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"You've used {used} of {limit} CV uploads this month. Your allowance resets next month.",
         )
-    user_directory = UPLOADS_DIR / user["id"]
-    user_directory.mkdir(parents=True, exist_ok=True)
-    cv_path = user_directory / f"cv{suffix}"
-    cv_path.write_bytes(content)
-    # A replacement CV deserves a fresh portrait check, even if an earlier
-    # upload had no usable headshot.
-    _headshot_check_marker(user["id"]).unlink(missing_ok=True)
-    job = storage.start_cv_analysis(user["id"])
-    background_tasks.add_task(_analyse_uploaded_cv_in_background, user["id"], str(cv_path))
+    if outcome == "started":
+        background_tasks.add_task(_analyse_uploaded_cv_in_background, user["id"], str(cv_path))
     return {
         "status": job["status"], "started_at": job["started_at"],
         "uploads_used": used,
@@ -1647,7 +1692,7 @@ async def upload_cv(
 
 
 @app.get("/me/cv-analysis")
-def get_cv_analysis(user: CurrentUser, storage: Storage) -> dict[str, Any]:
+def get_cv_analysis(user: CurrentUser, storage: Storage, include_profile: bool = True) -> dict[str, Any]:
     """Polling endpoint for the setup screen; never keeps a browser request open."""
     job = storage.get_cv_analysis(user["id"])
     if not job:
@@ -1657,9 +1702,19 @@ def get_cv_analysis(user: CurrentUser, storage: Storage) -> dict[str, Any]:
             "cv_uploads": _cv_upload_allowance(user, storage),
         }
     response: dict[str, Any] = dict(job)
+    phase = str(job["status"])
+    response["profile_ready"] = phase in {"matching", "matching_failed", "complete"}
+    response["matching_status"] = {
+        "matching": "processing", "matching_failed": "failed", "complete": "complete",
+    }.get(phase, "not_started")
+    if response["profile_ready"]:
+        # Existing Android builds understand 'complete', so they can open the
+        # saved profile too. New clients also show the separate matching phase.
+        response["status"] = "complete"
+        response["error"] = None
     response["uploads_used"] = storage.cv_upload_count_this_month(user["id"])
     response["cv_uploads"] = _cv_upload_allowance(user, storage)
-    if job["status"] == "complete":
+    if response["profile_ready"] and include_profile:
         artist = storage.get_artist_for_user(user["id"])
         response["artist_dna"] = _artist_dna_with_profile_questions(artist["dna"]) if artist else None
     return response

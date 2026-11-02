@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 import json
 import threading
-from datetime import datetime, timezone
+import time
+import tempfile
+from contextlib import contextmanager
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 
@@ -44,40 +47,111 @@ def _usage_path() -> Path:
     return Path("data/ai-request-usage.json")
 
 
-def reserve_ai_request(model: str, operation: str) -> None:
-    """Reserve one request against a persistent UTC daily hard limit.
+@contextmanager
+def _locked_usage(path: Path):
+    """Serialize processes sharing one persistent ledger (Windows and Linux).
 
-    The reservation happens before contacting OpenAI, so concurrent workers or
-    retries cannot exceed the configured server-side allowance. Failed provider
-    calls intentionally still count: this is a safety ceiling, not billing
-    reconciliation.
+    The sidecar must remain at a stable path: replacing the JSON file must not
+    replace the inode on which another process holds its lock. Separate hosts
+    with separate disks do NOT share this allowance.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix(path.suffix + ".lock").open("a+b") as lock:
+        deadline = time.monotonic() + 5
+        acquired = False
+        while not acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise AIRequestsDisabledError("AI usage accounting is busy; please retry later.") from None
+                time.sleep(0.02)
+        try:
+            yield lock
+        finally:
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _read_usage(path: Path, lock, today: str) -> dict:
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        lock.seek(0)
+        if lock.read(1):
+            raise ValueError("Previously initialized ledger is missing")
+        return {"date": today, "count": 0, "operations": {}}
+    if not isinstance(state, dict):
+        raise ValueError("Invalid usage ledger")
+    recorded_date = date.fromisoformat(state["date"])
+    count, operations = state["count"], state["operations"]
+    if (type(count) is not int or count < 0 or not isinstance(operations, dict)
+            or any(not isinstance(key, str) or type(value) is not int or value < 0
+                   for key, value in operations.items())
+            or sum(operations.values()) != count
+            or recorded_date > date.fromisoformat(today)):
+        raise ValueError("Invalid usage ledger")
+    if recorded_date.isoformat() != today:
+        return {"date": today, "count": 0, "operations": {}}
+    return state
+
+
+def _write_usage(path: Path, state: dict) -> None:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".tmp", delete=False) as output:
+            temporary = Path(output.name)
+            json.dump(state, output, sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def reserve_ai_request(model: str, operation: str) -> None:
+    """Reserve a logical AI operation before contacting the provider.
+
+    Failed provider calls still count. This is a request allowance on a shared
+    persistent filesystem, not a currency cutoff or a count of SDK retries.
+    Invalid accounting blocks requests instead of resetting the allowance.
     """
     require_ai_requests_enabled(model)
-    daily_limit = max(1, int(os.getenv("STAGEVIVA_AI_DAILY_REQUEST_LIMIT", "100")))
-    today = datetime.now(timezone.utc).date().isoformat()
-    path = _usage_path()
-
-    with _usage_lock:
-        state: dict[str, object] = {"date": today, "count": 0, "operations": {}}
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict) and loaded.get("date") == today:
-                state = loaded
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
-
-        count = int(state.get("count", 0))
-        if count >= daily_limit:
-            raise AIRequestsDisabledError(
-                f"StageViva's daily AI safety limit of {daily_limit} requests has been reached."
-            )
-
-        operations = state.get("operations")
-        if not isinstance(operations, dict):
-            operations = {}
-        operations[operation] = int(operations.get(operation, 0)) + 1
-        state = {"date": today, "count": count + 1, "operations": operations}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
-        temporary.replace(path)
+    try:
+        daily_limit = int(os.getenv("STAGEVIVA_AI_DAILY_REQUEST_LIMIT", "100"))
+        if daily_limit < 1:
+            raise ValueError("Daily request limit must be positive")
+        path = _usage_path()
+        with _usage_lock, _locked_usage(path) as lock:
+            today = datetime.now(timezone.utc).date().isoformat()
+            state = _read_usage(path, lock, today)
+            if state["count"] >= daily_limit:
+                raise AIRequestsDisabledError(
+                    f"StageViva's daily AI safety limit of {daily_limit} requests has been reached."
+                )
+            state["count"] += 1
+            state["operations"][operation] = state["operations"].get(operation, 0) + 1
+            _write_usage(path, state)
+            # Remember successful initialization so losing the ledger cannot
+            # silently recreate today's allowance. Preserve both files.
+            lock.seek(0)
+            if not lock.read(1):
+                lock.write(b"1")
+                lock.flush()
+                os.fsync(lock.fileno())
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        raise AIRequestsDisabledError(
+            "AI usage accounting is unavailable. Analysis is paused until it is checked."
+        ) from None

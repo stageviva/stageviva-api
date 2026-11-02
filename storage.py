@@ -1042,6 +1042,46 @@ class StageVivaStorage:
             self.connection.rollback()
             raise
 
+    def claim_cv_upload_this_month(
+        self, user_id: str, limit: int, save_upload: Callable[[], None],
+    ) -> tuple[str, int, dict[str, Any] | None]:
+        """Claim one job and allowance together, saving only the winning upload.
+
+        Keep the short local file write inside the transaction so another
+        request cannot replace the CV or start work before its file is ready.
+        File-write failures roll back both the job and allowance.
+        """
+        if limit < 1:
+            raise ValueError("CV upload allowance must be positive.")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            used = self.cv_upload_count_this_month(user_id)
+            job = self.get_cv_analysis(user_id)
+            if job and job["status"] in {"processing", "matching"}:
+                self.connection.rollback()
+                return "processing", used, job
+            if used >= limit:
+                self.connection.rollback()
+                return "limit", used, None
+            now = _utc_now()
+            self.connection.execute(
+                "INSERT INTO cv_upload_events (id, user_id, created_at) VALUES (?, ?, ?)",
+                (_stable_id("cv_upload", f"{user_id}:{now}:{uuid.uuid4().hex}"), user_id, now),
+            )
+            save_upload()
+            self.connection.execute("""
+                INSERT INTO cv_analysis_jobs (user_id, status, error, started_at, completed_at)
+                VALUES (?, 'processing', NULL, ?, NULL)
+                ON CONFLICT(user_id) DO UPDATE SET status='processing', error=NULL,
+                    started_at=excluded.started_at, completed_at=NULL
+            """, (user_id, now))
+            job = self.get_cv_analysis(user_id)
+            self.connection.commit()
+            return "started", used + 1, job
+        except Exception:
+            self.connection.rollback()
+            raise
+
     def release_latest_cv_upload_this_month(self, user_id: str) -> bool:
         """Return an allowance consumed by an analysis that could not complete."""
         now = datetime.now(timezone.utc)
@@ -1078,6 +1118,26 @@ class StageVivaStorage:
             UPDATE cv_analysis_jobs SET status = ?, error = ?, completed_at = ? WHERE user_id = ?
         """, ("failed" if error else "complete", error, _utc_now(), user_id))
         self.connection.commit()
+
+    def mark_cv_profile_ready(self, user_id: str) -> None:
+        self.connection.execute("""
+            UPDATE cv_analysis_jobs SET status = 'matching', error = NULL
+            WHERE user_id = ? AND status = 'processing'
+        """, (user_id,))
+        self.connection.commit()
+
+    def complete_cv_matching(self, user_id: str, *, failed: bool = False) -> None:
+        self.connection.execute("""
+            UPDATE cv_analysis_jobs SET status = ?, completed_at = ?
+            WHERE user_id = ? AND status = 'matching'
+        """, ("matching_failed" if failed else "complete", _utc_now(), user_id))
+        self.connection.commit()
+
+    def list_matching_cv_analyses(self) -> list[str]:
+        rows = self.connection.execute(
+            "SELECT user_id FROM cv_analysis_jobs WHERE status = 'matching'",
+        ).fetchall()
+        return [str(row["user_id"]) for row in rows]
 
     def get_cv_analysis(self, user_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
@@ -1191,7 +1251,7 @@ class StageVivaStorage:
         return matches
 
     def weekly_released_match_ids(
-        self, user_id: str, week_start: str, candidate_ids: list[str], *, limit: int = 3,
+        self, user_id: str, week_start: str, candidate_ids: list[str], *, limit: int = 3, finalize: bool = True,
     ) -> set[str]:
         """Freeze a Basic member's three weekly matches on their first visit that week."""
         row = self.connection.execute("""
@@ -1200,6 +1260,8 @@ class StageVivaStorage:
         """, (user_id, week_start)).fetchone()
         if row:
             return {str(value) for value in json.loads(row["opportunity_ids_json"])}
+        if not finalize:
+            return set()
         ids = list(dict.fromkeys(candidate_ids))[:limit]
         self.connection.execute("""
             INSERT OR IGNORE INTO weekly_match_releases
