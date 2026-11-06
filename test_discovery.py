@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
-import requests
+from public_source import PublicSourceError
 
 from opportunity_discovery import (
     SourceFetchError, fetch_page,
@@ -15,9 +15,7 @@ from opportunity_discovery import (
 
 class SourceFetchTest(unittest.TestCase):
     def test_blocked_source_raises_an_error_without_exposing_url_credentials(self) -> None:
-        response = Mock(status_code=403)
-        response.raise_for_status.side_effect = requests.HTTPError(response=response)
-        with patch("opportunity_discovery.requests.get", return_value=response):
+        with patch("opportunity_discovery.fetch_public_html", side_effect=PublicSourceError("Source example.test returned HTTP 403.")):
             with self.assertRaises(SourceFetchError) as raised:
                 fetch_page("https://example.test/jobs?access_token=private")
         self.assertIn("HTTP 403", str(raised.exception))

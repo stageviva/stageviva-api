@@ -119,4 +119,17 @@ OPPORTUNITY_SCHEMA = _object({
     }),
     "missing_information": _string_array(),
     "overall_confidence": {"type": "string", "enum": CONFIDENCE_LEVELS},
+    "classification": _object({
+        "decision": {"type": "string", "enum": [
+            "VALID_DANCER_OPPORTUNITY", "INVALID_NON_DANCER_OPPORTUNITY", "NEEDS_VERIFICATION",
+        ]},
+        "selection_outcome": STRING,
+        "evidence": _string_array(),
+        "application_kind": {"type": "string", "enum": [
+            "direct_form", "official_announcement", "email", "relevant_listing", "unverified",
+        ]},
+        "application_target": STRING,
+        "application_evidence": _string_array(),
+        "material_conflicts": _string_array(),
+    }),
 })

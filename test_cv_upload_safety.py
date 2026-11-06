@@ -197,6 +197,7 @@ class CvUploadSafetyTest(unittest.TestCase):
 
     def test_partial_matching_failure_is_reported_instead_of_claiming_success(self):
         storage = Mock()
+        storage.cached_match.return_value = None
         storage.list_opportunity_dnas.return_value = [("one", {}), ("two", {})]
         with patch.object(api, "match_artist_to_opportunity", side_effect=[
             {"overall": {"recommendation": "not_suitable"}}, RuntimeError("synthetic failed match"),

@@ -24,7 +24,7 @@ class OpportunityPresentationTest(unittest.TestCase):
         card = opportunity_card(item)
         self.assertEqual(card["title"], "Dancers Who Sing Required For Broadway Musical")
 
-    def test_unknown_application_url_falls_back_to_the_listing_page(self) -> None:
+    def test_unknown_application_url_keeps_source_separate(self) -> None:
         item = {
             "opportunity_id": "opportunity_1",
             "listing_url": "https://example.org/audition",
@@ -35,7 +35,12 @@ class OpportunityPresentationTest(unittest.TestCase):
                 "source": {"official_url": {"value": "unknown"}},
             },
         }
-        self.assertEqual(opportunity_detail(item)["application"]["url"], "https://example.org/audition")
+        detail = opportunity_detail(item)
+        self.assertEqual(detail["application"]["url"], "")
+        self.assertEqual(detail["listing_url"], "https://example.org/audition")
+        legacy_detail = opportunity_detail(item, legacy_application=True)
+        self.assertEqual(legacy_detail["application"]["url"], "https://example.org/audition")
+        self.assertEqual(legacy_detail["application"]["label"], "")
 
     def test_directory_listing_is_not_presented_as_an_official_apply_link(self) -> None:
         item = {
@@ -49,6 +54,7 @@ class OpportunityPresentationTest(unittest.TestCase):
             },
         }
         self.assertEqual(opportunity_detail(item)["application"]["url"], "")
+        self.assertEqual(opportunity_detail(item, legacy_application=True)["application"]["url"], "")
 
     def test_representation_listings_are_an_agency_category(self) -> None:
         item = {

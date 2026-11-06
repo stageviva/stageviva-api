@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from match_service import match_artist_to_opportunity
+from match_engine import match_input_signature
 from opportunity_discovery import (
     DiscoveredOpportunity,
     discover_balletplaces,
@@ -29,6 +30,7 @@ from instagram_discovery import discover_instagram_source
 from opportunity_intelligence import DiscoveryContext, analyse_opportunity
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_policy import is_school_or_training_opportunity, is_non_performer_opportunity
+from opportunity_quality import review_reason
 from source_registry import Source, get_active_sources
 from storage import StageVivaStorage
 
@@ -128,10 +130,26 @@ def run_pipeline(
         try:
             analysis_attempts += 1
             opportunity = (
-                analyse_opportunity(item.listing_url, _discovery_context(item), listing_text=item.description)
+                analyse_opportunity(item.listing_url, _discovery_context(item), listing_text=item.description,
+                                    previous=existing["opportunity"] if existing else None)
                 if analyse is None
                 else analyse(item.listing_url, _discovery_context(item))
             )
+            if existing and opportunity is existing["opportunity"]:
+                skipped += 1
+                continue
+            if "stageviva_review" in opportunity:
+                reason = "expired" if not is_current_opportunity(opportunity) else review_reason(opportunity)
+                if reason:
+                    if existing and existing["visible"] and opportunity["stageviva_review"].get("research_error"):
+                        failures.append(f"{item.listing_url}: linked source unavailable during verification")
+                        continue
+                    storage.upsert_opportunity(item, opportunity, hidden_reason=reason)
+                    if reason == "expired":
+                        skipped_expired += 1
+                    else:
+                        skipped_ineligible += 1
+                    continue
             if not is_current_opportunity(opportunity):
                 if existing:
                     storage.hide_opportunity(existing["id"], reason="expired")
@@ -155,18 +173,25 @@ def run_pipeline(
                 "title": item.title, "source_name": item.source_name, "visible": True,
                 "opportunity": opportunity,
             }
-            if storage.duplicate_of(candidate, exclude_id=existing["id"] if existing else None):
-                storage.reject_listing(item.listing_url, item.source_name, "duplicate")
+            duplicate = storage.duplicate_of(candidate, exclude_id=existing["id"] if existing else None)
+            if duplicate:
+                if "stageviva_review" in opportunity:
+                    opportunity["stageviva_review"]["duplicate_of"] = duplicate["id"]
+                    storage.upsert_opportunity(item, opportunity, hidden_reason="duplicate")
+                else:
+                    storage.reject_listing(item.listing_url, item.source_name, "duplicate")
                 skipped_ineligible += 1
                 continue
-            # Publish current opportunities even when a source has omitted
-            # details or its official application link cannot yet be verified.
-            # Missing information is useful context, not a reason to hide a
-            # live listing. Expired listings remain excluded above.
+            # Optional details can be missing. The structured review above
+            # requires a verified application route before publication.
             opportunity_id = storage.upsert_opportunity(item, opportunity)
             analysed += 1
             stored_opportunities += 1
+            if not storage.opportunity_by_listing_url(item.listing_url)["visible"]:
+                continue
             for artist_id, artist in artist_records:
+                if storage.cached_match(artist_id, opportunity_id, match_input_signature(artist, opportunity)) is not None:
+                    continue
                 result = match(artist, opportunity)
                 storage.upsert_match(artist_id, opportunity_id, result)
                 stored_matches += 1

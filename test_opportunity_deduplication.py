@@ -107,7 +107,7 @@ class OpportunityDeduplicationTest(unittest.TestCase):
                 second = {
                     "id": "second", "listing_url": "https://board.example/second", "title": "Production Dancers Needed",
                     "source_name": "Board", "visible": True,
-                    "opportunity": opportunity("Production Dancers Needed", description="Full cruise contract", official_url="https://employer.example/apply"),
+                    "opportunity": opportunity("Dancers Required", description="Full cruise contract", official_url="https://employer.example/apply"),
                 }
                 storage.connection.executemany(
                     "INSERT INTO opportunities (id, listing_url, title, source_name, source_url, category, opportunity_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",

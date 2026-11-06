@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlparse
 import re
+from opportunity_quality import INVALID, VALID
 
 
 DIRECTORY_DOMAINS = frozenset({
@@ -51,6 +52,8 @@ def has_verified_official_application_url(opportunity: dict[str, Any], listing_u
 
 def is_school_or_training_opportunity(opportunity: dict[str, Any]) -> bool:
     """Identify education adverts while preserving real company trainee roles."""
+    if "stageviva_review" in opportunity:
+        return False  # Structured publication reasons are evaluated separately.
     text = " ".join((
         _value(opportunity, "identity", "title"),
         _value(opportunity, "identity", "opportunity_type"),
@@ -113,6 +116,9 @@ def is_non_performer_opportunity(opportunity: dict[str, Any]) -> bool:
     A performing audition may mention its choreographer or director in the
     description. Those incidental references must never exclude the artists.
     """
+    decision = opportunity.get("stageviva_review", {}).get("decision")
+    if decision in {VALID, INVALID}:
+        return decision == INVALID
     roles = (
         _value(opportunity, "identity", "title"),
         _value(opportunity, "identity", "opportunity_type"),

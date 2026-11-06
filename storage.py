@@ -68,6 +68,15 @@ def merge_opportunity_updates(opportunity: dict[str, Any], updates: dict[str, An
             set_value(path, updates[key])
     if "official_url" in updates:
         set_value(("source", "official_url"), updates["official_url"])
+    review = result.get("stageviva_review", {})
+    pathway = review.get("pathway", {})
+    if pathway:
+        path = ("application", "email" if pathway["kind"] == "email" else "application_url")
+        if _document_text(result, *path) != pathway.get("target"):
+            review["previous_pathway"] = review.pop("pathway")
+    if updates.get("review_confirmed"):
+        from opportunity_quality import confirm_editorial_review
+        confirm_editorial_review(result)
     admin = result.setdefault("stageviva_admin", {})
     if "track" in updates:
         admin["track"] = updates["track"]
@@ -148,7 +157,17 @@ def _same_live_opportunity(first: dict[str, Any], second: dict[str, Any]) -> boo
     second_opportunity = second["opportunity"]
     first_url = _canonical_url(first_opportunity, str(first["listing_url"]))
     second_url = _canonical_url(second_opportunity, str(second["listing_url"]))
-    if first_url and second_url and first_url == second_url:
+    shared_url = bool(first_url and first_url == second_url)
+    for path in (("identity", "organisation"), ("location", "city"), ("location", "country"),
+                 ("dates", "application_deadline"), ("dates", "audition_dates"),
+                 ("dates", "contract_start"), ("requirements", "physical", "gender_requirement"),
+                 ("requirements", "experience", "roles_or_ranks")):
+        left, right = (_document_text(value, *path).casefold() for value in (first_opportunity, second_opportunity))
+        if _known_text(left) and _known_text(right) and left != right:
+            return False
+    first_role = _document_text(first_opportunity, "identity", "title").casefold()
+    second_role = _document_text(second_opportunity, "identity", "title").casefold()
+    if shared_url and _known_text(first_role) and first_role == second_role:
         return True
 
     # Some boards create two URLs for the same casting. Only merge these when
@@ -664,6 +683,7 @@ class StageVivaStorage:
         """
         from opportunity_lifecycle import is_current_opportunity
         from opportunity_policy import is_school_or_training_opportunity, is_non_performer_opportunity
+        from opportunity_quality import review_reason
 
         restored = 0
         for item in self.list_all_opportunities():
@@ -677,6 +697,7 @@ class StageVivaStorage:
             if not any(url.startswith(("https://", "http://")) and _generic_application_url(url) for url in urls):
                 continue
             if (not is_current_opportunity(opportunity)
+                    or review_reason(opportunity)
                     or is_school_or_training_opportunity(opportunity)
                     or is_non_performer_opportunity(opportunity)
                     or self.duplicate_of(item, exclude_id=item["id"])):
@@ -1456,20 +1477,23 @@ class StageVivaStorage:
             for row in rows
         ]
 
-    def upsert_opportunity(self, item: DiscoveredOpportunity, opportunity: dict[str, Any]) -> str:
+    def upsert_opportunity(self, item: DiscoveredOpportunity, opportunity: dict[str, Any], *, hidden_reason: str | None = None) -> str:
         opportunity_id = _stable_id("opportunity", item.listing_url.rstrip("/").lower())
         now = _utc_now()
         self.connection.execute("""
             INSERT INTO opportunities (id, listing_url, title, source_name, source_url, category,
-                opportunity_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                opportunity_json, created_at, updated_at, visible, hidden_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(listing_url) DO UPDATE SET title=excluded.title,
                 source_name=excluded.source_name, source_url=excluded.source_url,
                 category=excluded.category, opportunity_json=excluded.opportunity_json,
-                updated_at=excluded.updated_at
-        """, (opportunity_id, item.listing_url, item.title, item.source_name, item.source_url,
-              item.category, json.dumps(opportunity, ensure_ascii=False), now, now))
+                updated_at=excluded.updated_at,
+                visible=CASE WHEN opportunities.hidden_reason='manual' THEN 0 ELSE excluded.visible END,
+                hidden_reason=CASE WHEN opportunities.hidden_reason='manual' THEN 'manual' ELSE excluded.hidden_reason END
+        """, (opportunity_id, item.listing_url, _document_text(opportunity, "identity", "title") or item.title,
+              item.source_name, item.source_url, item.category, json.dumps(opportunity, ensure_ascii=False),
+              now, now, int(hidden_reason is None), hidden_reason))
         self.connection.commit()
-        return opportunity_id
+        return str(self.connection.execute("SELECT id FROM opportunities WHERE listing_url=?", (item.listing_url,)).fetchone()[0])
 
     def upsert_match(self, artist_id: str, opportunity_id: str, match: dict[str, Any]) -> None:
         self.connection.execute("""
@@ -1478,6 +1502,16 @@ class StageVivaStorage:
                 match_json=excluded.match_json, updated_at=excluded.updated_at
         """, (artist_id, opportunity_id, json.dumps(match, ensure_ascii=False), _utc_now()))
         self.connection.commit()
+
+    def cached_match(self, artist_id: str, opportunity_id: str, signature: str) -> dict[str, Any] | None:
+        row = self.connection.execute("""
+            SELECT match_json FROM match_results WHERE artist_id = ? AND opportunity_id = ?
+        """, (artist_id, opportunity_id)).fetchone()
+        if row:
+            result = json.loads(row["match_json"])
+            if result.get("stageviva_assessment", {}).get("input_signature") == signature:
+                return result
+        return None
 
     def queue_notification(self, artist_id: str, opportunity_id: str, match: dict[str, Any]) -> bool:
         preferences = self.connection.execute("""

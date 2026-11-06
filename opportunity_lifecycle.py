@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import re
 from typing import Any
 
@@ -21,12 +21,18 @@ def _value(opportunity: dict[str, Any], *path: str) -> Any:
 def _parse_date(value: str) -> date | None:
     if not value or value.lower() == "unknown":
         return None
+    # Dateutil otherwise fills in a missing year from the runtime date.
+    year = re.search(r"\b(?:19|20)\d{2}\b", value)
+    if not year or not re.search(r"\b(?:[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\b", value[:year.start()] + value[year.end():]):
+        return None
     try:
         return date.fromisoformat(value.strip())
     except ValueError:
         pass
     try:
-        return date_parser.parse(value, fuzzy=True, dayfirst=True).date()
+        parsed = date_parser.parse(value, fuzzy=True, dayfirst=True, default=datetime(2001, 1, 1)).date()
+        alternate = date_parser.parse(value, fuzzy=True, dayfirst=True, default=datetime(2002, 2, 2)).date()
+        return parsed if parsed == alternate else None
     except (OverflowError, TypeError, ValueError):
         return None
 
@@ -40,6 +46,8 @@ def opportunity_deadline(opportunity: dict[str, Any]) -> date | None:
 def is_current_opportunity(opportunity: dict[str, Any], today: date | None = None) -> bool:
     """Return false for expired deadlines, auditions and past season notices."""
     today = today or date.today()
+    if _value(opportunity, "status", "value") in {"closed", "cancelled", "archived"}:
+        return False
     deadline_date = opportunity_deadline(opportunity)
     if deadline_date is not None and deadline_date < today:
         return False

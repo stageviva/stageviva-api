@@ -51,7 +51,8 @@ from billing import (
 from cv_headshot import extract_cv_headshot
 from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
-from match_engine import _apply_location_and_work_rights_guard, reapply_deterministic_match_guards
+from match_engine import _apply_location_and_work_rights_guard, match_input_signature, reapply_deterministic_match_guards
+from opportunity_quality import review_reason, safe_application_url
 from match_service import match_artist_to_opportunity
 from native_push_notifications import (
     NativePushConfigurationError,
@@ -147,6 +148,7 @@ class OpportunityTrackerRequest(BaseModel):
 
 
 class AdminOpportunityUpdateRequest(BaseModel):
+    review_confirmed: bool | None = None
     title: str | None = Field(default=None, min_length=1, max_length=300)
     organisation: str | None = Field(default=None, min_length=1, max_length=240)
     role_summary: str | None = Field(default=None, min_length=1, max_length=500)
@@ -202,6 +204,8 @@ class AdminManualOpportunityRequest(BaseModel):
     track: str = Field(default="contract", pattern="^(contract|agency|apprenticeship)$")
     categories: list[str] = Field(default_factory=lambda: ["performing_arts"])
     opportunity: dict[str, Any] | None = None
+    visible: bool = True
+    review_confirmed: bool = False
 
 
 class AdminOpportunityUrlRequest(BaseModel):
@@ -1097,10 +1101,17 @@ def _match_artist_against_catalogue(
     # OpenAI matching is network-bound. Evaluate a small group concurrently,
     # then keep database writes serial so SQLite remains reliable.
     results: dict[str, dict[str, Any]] = {}
+    pending = []
+    for opportunity_id, opportunity in opportunities:
+        cached = storage.cached_match(artist_id, opportunity_id, match_input_signature(artist_dna, opportunity))
+        if cached is None:
+            pending.append((opportunity_id, opportunity))
+        else:
+            matched += 1
     with ThreadPoolExecutor(max_workers=min(2, max(1, len(opportunities)))) as executor:
         futures = {
             executor.submit(match_artist_to_opportunity, artist_dna, opportunity): opportunity_id
-            for opportunity_id, opportunity in opportunities
+            for opportunity_id, opportunity in pending
         }
         for future in as_completed(futures):
             opportunity_id = futures[future]
@@ -1128,6 +1139,9 @@ def _match_opportunity_against_registered_artists(
     matched = queued = 0
     artist_limit = max(1, int(os.getenv("STAGEVIVA_MAX_ARTISTS_PER_OPPORTUNITY", "20")))
     for artist_id, artist_dna in storage.list_registered_artists()[:artist_limit]:
+        if storage.cached_match(artist_id, opportunity_id, match_input_signature(artist_dna, opportunity)) is not None:
+            matched += 1
+            continue
         result = match_artist_to_opportunity(artist_dna, opportunity)
         storage.upsert_match(artist_id, opportunity_id, result)
         matched += 1
@@ -1198,7 +1212,10 @@ def _apply_current_location_guards(
         return matches
     for item in matches:
         original = json.dumps(item["match"], ensure_ascii=False, sort_keys=True)
-        guarded = _apply_location_and_work_rights_guard(artist["dna"], item["opportunity"], item["match"])
+        if "stageviva_assessment" in item["match"] or "stageviva_review" in item["opportunity"]:
+            guarded = reapply_deterministic_match_guards(artist["dna"], item["opportunity"], item["match"])
+        else:
+            guarded = _apply_location_and_work_rights_guard(artist["dna"], item["opportunity"], item["match"])
         item["match"] = guarded
         if json.dumps(guarded, ensure_ascii=False, sort_keys=True) != original:
             storage.upsert_match(artist["id"], item["opportunity_id"], guarded)
@@ -1811,7 +1828,9 @@ def list_opportunities(user: CurrentUser, storage: Storage) -> list[dict[str, An
 
 
 @app.get("/opportunities/{opportunity_id}")
-def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) -> dict[str, Any]:
+def get_opportunity(
+    opportunity_id: str, user: CurrentUser, storage: Storage, verified_application: bool = False,
+) -> dict[str, Any]:
     """Return a clean detail screen for one recommendation."""
     all_matches = _apply_current_location_guards(user, storage, storage.list_matches_for_user(user["id"]))
     released = _released_match_ids(user, storage, all_matches)
@@ -1825,7 +1844,7 @@ def get_opportunity(opportunity_id: str, user: CurrentUser, storage: Storage) ->
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="This Premium match unlocks with Premium or on your next Monday release.",
                 )
-            return opportunity_detail(item)
+            return opportunity_detail(item, legacy_application=not verified_application)
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Opportunity not found.")
 
 
@@ -1864,6 +1883,7 @@ def _admin_opportunity_view(item: dict[str, Any]) -> dict[str, Any]:
         "source": item["source_name"],
         "visible": item["visible"],
         "hidden_reason": item.get("hidden_reason"),
+        "review_reason": review_reason(opportunity),
         "manual": item["category"] == "manual" or "manual" in item["source_name"].lower(),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
@@ -1873,6 +1893,9 @@ def _admin_opportunity_view(item: dict[str, Any]) -> dict[str, Any]:
 def _validate_admin_opportunity(
     opportunity: dict[str, Any], storage: StageVivaStorage, *, item: dict[str, Any], exclude_id: str | None = None,
 ) -> None:
+    if reason := review_reason(opportunity):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"This opportunity requires review ({reason.replace('_', ' ')}).")
     if is_non_performer_opportunity(opportunity):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="StageViva only lists performing and modelling roles, not management, teaching or backstage vacancies.")
@@ -2037,7 +2060,7 @@ def admin_update_opportunity(
     if payload.categories is not None and any(value not in OPPORTUNITY_CATEGORIES for value in payload.categories):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="One or more opportunity filters are not supported.")
-    if payload.official_url is not None and not payload.official_url.startswith(("https://", "http://")):
+    if payload.official_url is not None and not safe_application_url(payload.official_url.strip()):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="Use the official http(s) listing URL.")
     candidate = merge_opportunity_updates(existing["opportunity"], fields)
@@ -2051,9 +2074,9 @@ def admin_update_opportunity(
         changed = storage.set_opportunity_visibility(opportunity_id, payload.visible) or changed
     match_result = (
         _match_opportunity_against_registered_artists(opportunity_id, updated_opportunity, storage)
-        if updated_opportunity is not None else {"matched_artists": 0, "queued_notifications": 0}
+        if updated_opportunity is not None and effective_visible else {"matched_artists": 0, "queued_notifications": 0}
     )
-    delivery = _deliver_queued_push_notifications(storage)
+    delivery = _deliver_queued_push_notifications(storage) if effective_visible else {}
     return {"ok": True, **match_result, "notification_delivery": delivery}
 
 
@@ -2103,7 +2126,7 @@ def admin_analyse_opportunity_url(
         "contract_type": field_value(opportunity, "contract_and_compensation", "contract_type"),
         "description": field_value(opportunity, "identity", "description"),
         "opportunity": opportunity,
-        "can_publish": (is_current_opportunity(opportunity)
+        "can_publish": (review_reason(opportunity) is None and is_current_opportunity(opportunity)
                         and not is_school_or_training_opportunity(opportunity)
                         and not is_non_performer_opportunity(opportunity)),
     })
@@ -2114,7 +2137,7 @@ def admin_analyse_opportunity_url(
 def admin_add_opportunity(
     payload: AdminManualOpportunityRequest, admin: AdminUser, storage: Storage,
 ) -> dict[str, Any]:
-    if not payload.official_url.startswith(("https://", "http://")):
+    if not safe_application_url(payload.official_url.strip()):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="Use the official http(s) listing URL.")
     opportunity = payload.opportunity or {
@@ -2137,6 +2160,7 @@ def admin_add_opportunity(
         "official_url": payload.official_url.strip(), "contract_type": payload.contract_type.strip(),
         "description": payload.description.strip(), "track": payload.track,
         "categories": payload.categories,
+        "review_confirmed": payload.review_confirmed,
     })
     item = DiscoveredOpportunity(
         payload.title.strip(), payload.official_url.strip(), "StageViva manual review",
@@ -2145,11 +2169,14 @@ def admin_add_opportunity(
     if any(value not in OPPORTUNITY_CATEGORIES for value in payload.categories):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="One or more opportunity filters are not supported.")
-    _validate_admin_opportunity(opportunity, storage, item={
-        "id": "draft", "listing_url": payload.official_url.strip(), "title": payload.title.strip(),
-        "source_name": "StageViva manual review", "visible": True,
-    })
-    opportunity_id = storage.upsert_opportunity(item, opportunity)
+    if payload.visible:
+        _validate_admin_opportunity(opportunity, storage, item={
+            "id": "draft", "listing_url": payload.official_url.strip(), "title": payload.title.strip(),
+            "source_name": "StageViva manual review", "visible": True,
+        })
+    opportunity_id = storage.upsert_opportunity(item, opportunity, hidden_reason=None if payload.visible else "manual")
+    if not payload.visible:
+        return {"id": opportunity_id, "matched_artists": 0, "queued_notifications": 0, "notification_delivery": {}}
     match_result = _match_opportunity_against_registered_artists(opportunity_id, opportunity, storage)
     delivery = _deliver_queued_push_notifications(storage)
     return {"id": opportunity_id, **match_result, "notification_delivery": delivery}

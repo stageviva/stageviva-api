@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from openai import OpenAI
 
 from ai_safety import reserve_ai_request
 from match_schema import MATCH_SCHEMA
+from opportunity_quality import validate_shape
 
 
 # Matching runs once per visible opportunity after a CV upload. Use the fast
@@ -903,9 +905,66 @@ def reapply_deterministic_match_guards(
     responsive until the next deliberate full refresh.
     """
     guarded = copy.deepcopy(existing_match)
-    guarded = _apply_requirement_guards(artist_dna, opportunity, guarded)
-    guarded = _apply_gender_requirement_guard(artist_dna, opportunity, guarded)
-    return _apply_location_and_work_rights_guard(artist_dna, opportunity, guarded)
+    return _assessment(artist_dna, opportunity, guarded)
+
+
+def match_input_signature(artist_dna: dict[str, Any], opportunity: dict[str, Any]) -> str:
+    inputs = ["competitiveness-v1", MATCHING_MODEL, artist_dna, _match_opportunity_input(opportunity)]
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def _match_opportunity_input(opportunity: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in opportunity.items() if key not in {"stageviva_review", "stageviva_admin", "source"}}
+
+
+def _assessment(artist: dict, opportunity: dict, result: dict) -> dict:
+    """Add factual eligibility separately from the model's competitiveness estimate."""
+    prior = result.get("stageviva_assessment", {})
+    overall = result.setdefault("overall", {})
+    model_overall = prior.get("model_overall", dict(overall))
+    overall.update(model_overall)
+    result["gaps"] = [gap for gap in result.get("gaps", [])
+                      if gap.get("factor") not in {"Mandatory height", "Gender requirement", "Work rights and visa", "Preferred work location"}]
+    result = _apply_location_and_work_rights_guard(artist, opportunity, result)
+    result = _apply_gender_requirement_guard(artist, opportunity, result)
+    height = _field_text(opportunity, "requirements", "physical", "height_requirement")
+    recorded = _field_text(artist, "physical", "height")
+    minimum = re.search(r"(?:\bmin(?:imum)?\.?\s*(?:height\s*(?:of|:)?\s*)?(\d{3})\s*cm\b|\b(\d{3})\s*cm\s*(?:or taller|minimum|and above)\b)", height, re.I)
+    measured = re.fullmatch(r"(\d{3}(?:\.\d+)?)\s*cm", recorded, re.I)
+    height_status = "not_applicable" if not height or height.casefold() == "unknown" else "unknown"
+    gender = _required_genders(opportunity)
+    artist_gender = _normalise_artist_gender(artist.get("identity", {}).get("gender"))
+    warning = ""
+    checks = []
+    if minimum and not re.search(r"\b(preferred|ideally|desirable|approx(?:imately)?)\b", height, re.I):
+        threshold = int(minimum.group(1) or minimum.group(2))
+        # A multi-part or role-specific criterion needs human interpretation.
+        if len(re.findall(r"\d{3}\s*cm", height, re.I)) == 1 and 100 <= threshold <= 230:
+            if measured and 100 <= float(measured[1]) <= 230:
+                height_status = "eligible" if float(measured[1]) >= threshold else "ineligible"
+                if height_status == "ineligible":
+                    warning = f"Minimum height is {threshold} cm. Your profile lists {recorded}."
+            else:
+                checks.append(f"The listing specifies a minimum height of {threshold} cm. Confirm your height before applying.")
+    if gender and artist_gender == "unknown":
+        checks.append("Check the casting requirement against your profile before applying.")
+    elif gender and artist_gender not in gender:
+        warning = warning or f"This role is seeking a {next(iter(gender)).replace('_', ' ')} performer."
+    result.setdefault("physical_match", {})["height"] = {"status": height_status, "evidence": [warning] if height_status == "ineligible" else []}
+    if warning:
+        overall.update(match_score=min(int(overall.get("match_score", 0) or 0), 20),
+                       match_level="very_weak", recommendation="not_recommended")
+    evidence_reasons = [reason for reason in result.get("match_reasons", []) if reason.get("evidence")]
+    confidence = "insufficient" if not evidence_reasons else "limited" if len(evidence_reasons) == 1 or checks else "supported"
+    if confidence == "insufficient" and not warning:
+        overall.update(match_level="unknown", recommendation="unknown")
+    result["stageviva_assessment"] = {
+        "eligibility": "ineligible" if warning else "unknown",
+        "height": height_status, "warning": warning, "checks": checks,
+        "confidence": confidence, "model_overall": model_overall,
+        "input_signature": prior.get("input_signature"),
+    }
+    return result
 
 
 # ============================================================
@@ -965,7 +1024,7 @@ def match_artist_to_opportunity(
         f"{json.dumps(artist_dna, ensure_ascii=False, indent=2)}\n\n"
         "OPPORTUNITY INTELLIGENCE\n"
         "========================\n"
-        f"{json.dumps(opportunity, ensure_ascii=False, indent=2)}\n"
+        f"{json.dumps(_match_opportunity_input(opportunity), ensure_ascii=False, indent=2)}\n"
     )
 
     reserve_ai_request(MATCHING_MODEL, "artist_opportunity_match")
@@ -977,7 +1036,7 @@ def match_artist_to_opportunity(
         # ceiling avoids truncated JSON while remaining far below the former
         # unrestricted slow-model requests.
         max_output_tokens=2_000,
-        instructions=MATCHING_INSTRUCTIONS,
+        instructions=MATCHING_INSTRUCTIONS + "\nEstimate initial-selection competitiveness from evidenced, opportunity-specific criteria. The score is not a hiring probability. Weight mandatory and preferred criteria differently. An absent fact is unknown, never a confirmed deficiency or a match. Separate the candidate's strengths, explicit barriers and material uncertainties. Use short evidence-grounded statements without repeating the summary.",
         input=prompt,
         text={
             "format": {
@@ -990,10 +1049,12 @@ def match_artist_to_opportunity(
     )
 
     try:
-        calibrated = _calibrate_evidence_score(json.loads(response.output_text))
-        guarded = _apply_requirement_guards(artist_dna, opportunity, calibrated)
-        guarded = _apply_gender_requirement_guard(artist_dna, opportunity, guarded)
-        return _apply_location_and_work_rights_guard(artist_dna, opportunity, guarded)
+        result = json.loads(response.output_text)
+        if not validate_shape(result, MATCH_SCHEMA):
+            raise MatchEngineError("Matching response did not match the required schema.")
+        result = _assessment(artist_dna, opportunity, result)
+        result["stageviva_assessment"]["input_signature"] = match_input_signature(artist_dna, opportunity)
+        return result
 
     except json.JSONDecodeError as error:
         raise MatchEngineError(

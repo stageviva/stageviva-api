@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 from urllib.parse import urlparse
+from opportunity_quality import PATHWAY_LABELS, application_pathway, safe_application_url
 
 
 _DIRECTORY_DOMAINS = frozenset({
@@ -36,7 +37,7 @@ def field_value(document: dict[str, Any], *path: str) -> str:
 def _known(value: str) -> bool:
     normalized = value.strip().lower()
     return bool(normalized) and not (
-        normalized in {"unknown", "not specified", "n/a"}
+        normalized in {"unknown", "not specified", "n/a", "none"}
         or normalized.startswith("unknown;")
         or normalized.startswith("unknown ")
     )
@@ -48,10 +49,8 @@ def _public_url(*candidates: str) -> str:
         value = str(candidate or "").strip()
         if not _known(value):
             continue
-        if value.startswith(("https://", "http://")):
+        if safe_application_url(value):
             return value
-        if value.startswith("www."):
-            return f"https://{value}"
     return ""
 
 
@@ -142,13 +141,18 @@ def opportunity_card(match_item: dict[str, Any]) -> dict[str, Any]:
     country = field_value(opportunity, "location", "country")
     location = ", ".join(part for part in (city, country) if _known(part)) or "Unknown location"
     overall = match_item["match"].get("overall", {})
+    assessment = match_item["match"].get("stageviva_assessment", {})
     return {
         "title": title,
+        "position": listing_title if _known(listing_title) else role_summary if _known(role_summary) else "",
+        "organisation": organisation if _known(organisation) else "",
         "role_summary": role_summary if _known(role_summary) else "Performance opportunity",
-        "deadline": "ASAP" if deadline.lower() in {"as soon as possible", "asap"} or not _known(deadline) else deadline,
+        "deadline": "ASAP" if deadline.lower() in {"as soon as possible", "asap"} else deadline if _known(deadline) else "",
         "location": location,
-        "match_score": overall.get("match_score", 0),
+        "match_score": None if assessment.get("confidence") == "insufficient" else overall.get("match_score"),
         "match_level": overall.get("match_level", "unknown"),
+        "assessment_confidence": assessment.get("confidence"),
+        "eligibility_warning": assessment.get("warning"),
         "track": opportunity_track(opportunity),
         "categories": opportunity_categories(opportunity),
     }
@@ -167,50 +171,70 @@ def _known_list(document: dict[str, Any], *path: str) -> list[str]:
     return [str(item).strip() for item in value if _known(str(item).strip())]
 
 
-def opportunity_detail(match_item: dict[str, Any]) -> dict[str, Any]:
+def opportunity_detail(match_item: dict[str, Any], *, legacy_application: bool = False) -> dict[str, Any]:
     """A performer-facing detail view; never leak the extraction schema."""
     opportunity = match_item["opportunity"]
     card = opportunity_card(match_item)
     match = match_item.get("match", {})
     requirements = opportunity.get("requirements", {})
     application = opportunity.get("application", {})
-    source = opportunity.get("source", {})
-    application_url = _public_url(
-        field_value(application, "application_url"),
-        field_value(source, "official_url"),
-    )
-    # An audition-directory page is useful during import, but it is not the
-    # performer's official application destination. Only fall back to the
-    # original listing when it is already a company/casting-site URL.
-    if not application_url and not _is_directory_url(match_item["listing_url"]):
-        application_url = _public_url(match_item["listing_url"])
+    pathway = application_pathway(opportunity)
+    kind = pathway.get("kind")
+    target = pathway.get("target", "")
+    source_url = _public_url(match_item.get("listing_url", ""))
+    if (legacy_application and "stageviva_review" not in opportunity
+            and safe_application_url(source_url) and not _is_directory_url(source_url)):
+        # Installed clients only read application.url. Keep their original
+        # direct listing accessible without trusting a cross-site legacy link.
+        target = source_url
+    assessment = match.get("stageviva_assessment", {})
+    physical = requirements.get("physical", {})
+    candidate_requirements = [
+        {"label": label, "value": value}
+        for key, label in (("height_requirement", "Height"), ("age_requirement", "Age"), ("gender_requirement", "Casting requirement"))
+        if _known(value := field_value(physical, key)) and value.casefold() not in {"age", "height", "gender"}
+    ]
+    experience = field_value(requirements, "experience", "required_level")
+    if experience.casefold() in {"high", "medium", "low", "very_high", "audition"}:
+        experience = ""
     return {
         "opportunity_id": match_item["opportunity_id"],
-        "company": card["title"],
-        "role": card["role_summary"],
-        "description": field_value(opportunity, "identity", "description") or "Details are being verified.",
+        "company": card["organisation"],
+        "role": card["position"] or card["role_summary"],
+        "track": card["track"],
+        "categories": card["categories"],
+        "description": field_value(opportunity, "identity", "description"),
+        "listing_url": source_url,
         "location": card["location"],
         "deadline": card["deadline"],
         "audition_dates": _known_list(opportunity, "dates", "audition_dates"),
         "contract_start": field_value(opportunity, "dates", "contract_start") or "Unknown",
         "contract_end": field_value(opportunity, "dates", "contract_end") or "Unknown",
         "contract_type": field_value(opportunity, "contract_and_compensation", "contract_type") or "Unknown",
+        "contract_duration": field_value(opportunity, "contract_and_compensation", "duration"),
         "compensation": field_value(opportunity, "contract_and_compensation", "compensation") or "Not specified",
         "requirements": {
             "styles": _known_list(requirements, "styles"),
             "techniques": _known_list(requirements, "techniques"),
-            "experience": field_value(requirements, "experience", "required_level") or "Not specified",
+            "experience": experience,
             "work_rights": field_value(requirements, "work_rights_or_visa") or "Not specified",
+            "physical": candidate_requirements,
+            "languages": _known_list(requirements, "languages"),
         },
         "application": {
-            "method": field_value(application, "method") or "See the official listing",
-            "url": application_url,
-            "email": field_value(application, "email"),
+            "method": field_value(application, "method"),
+            "url": target if kind != "email" else "",
+            "email": target if kind == "email" else "",
+            "label": PATHWAY_LABELS.get(kind, ""),
             "materials": _known_list(application, "materials"),
         },
         "match": {
             "score": card["match_score"],
             "level": card["match_level"],
+            "confidence": assessment.get("confidence"),
+            "status": assessment.get("eligibility"),
+            "eligibility_warning": assessment.get("warning"),
+            "checks": assessment.get("checks", []),
             "summary": match.get("overall", {}).get("summary", "Match details are being prepared."),
             "reasons": [item.get("reason", "") for item in match.get("match_reasons", []) if item.get("reason")],
             "gaps": [item.get("description", "") for item in match.get("gaps", []) if item.get("description")],
@@ -229,5 +253,9 @@ def matches_for_filters(
             continue
         if categories and not categories.intersection(card["categories"]):
             continue
-        result.append({**item, "card": card})
+        # Preserve the existing response shape while keeping retained source
+        # material and editorial notes on the admin side of the API.
+        public_opportunity = {key: value for key, value in item["opportunity"].items() if key != "stageviva_review"}
+        public_match = {key: value for key, value in item["match"].items() if key != "stageviva_assessment"}
+        result.append({**item, "match": public_match, "opportunity": public_opportunity, "card": card})
     return result

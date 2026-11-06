@@ -4,8 +4,8 @@ import re
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
+from public_source import PublicSourceError, fetch_public_html
 
 
 # ============================================================
@@ -65,22 +65,9 @@ def fetch_page(url: str) -> Optional[str]:
     """
 
     try:
-        response = requests.get(
-            url,
-            headers=DEFAULT_HEADERS,
-            timeout=20,
-        )
-
-        response.raise_for_status()
-
-        return response.text
-
-    except requests.RequestException as error:
-        response = getattr(error, "response", None)
-        code = getattr(response, "status_code", None)
-        reason = f"HTTP {code}" if code else type(error).__name__
-        host = urlparse(url).hostname or "source"
-        raise SourceFetchError(f"Could not fetch {host} ({reason}).") from error
+        return fetch_public_html(url, DEFAULT_HEADERS)[0]
+    except PublicSourceError as error:
+        raise SourceFetchError(str(error)) from error
 
 
 # ============================================================
