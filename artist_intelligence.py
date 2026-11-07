@@ -163,7 +163,7 @@ def extract_cv_text(
     )
 
 
-def _extract_image_text(path: Path, max_characters: int) -> str:
+def _extract_image_text(path: Path, max_characters: int, *, timeout: int = 0) -> str:
     """Read a photographed or screenshot CV locally with bounded OCR."""
     try:
         import pytesseract
@@ -188,7 +188,7 @@ def _extract_image_text(path: Path, max_characters: int) -> str:
                     "This CV image is too large. Please reduce its resolution and try again."
                 )
             image = ImageOps.autocontrast(image.convert("L"))
-            text = pytesseract.image_to_string(image, lang="eng").strip()
+            text = pytesseract.image_to_string(image, lang="eng", timeout=timeout).strip()
     except ArtistAnalysisError:
         raise
     except (UnidentifiedImageError, OSError, ValueError) as error:

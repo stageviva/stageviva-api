@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, Request as FastAPIRequest, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request as FastAPIRequest, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -61,6 +61,7 @@ from native_push_notifications import (
     send_test_native_push_notification,
 )
 from opportunity_discovery import DiscoveredOpportunity
+from opportunity_imports import ImportInputError, ImportQueue, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_TOTAL_BYTES
 from opportunity_intelligence import (
     DiscoveryContext,
     OpportunityFetchError,
@@ -94,6 +95,8 @@ def _persistent_runtime_path(filename: str, environment_key: str, local_default:
 
 DATABASE_PATH = _persistent_runtime_path("stageviva.db", "STAGEVIVA_DB", "stageviva.db")
 UPLOADS_DIR = Path(_persistent_runtime_path("uploads", "STAGEVIVA_UPLOADS_DIR", "data/uploads"))
+IMPORTS_DIR = Path(_persistent_runtime_path("opportunity-imports", "STAGEVIVA_IMPORTS_DIR", "data/opportunity-imports"))
+import_worker_lock = threading.Lock()
 TOKEN_LIFETIME_SECONDS = 60 * 60 * 24 * 14
 password_hasher = PasswordHash.recommended()
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -654,7 +657,14 @@ async def lifespan(_: FastAPI):
             target=_refresh_existing_artist_matches,
             args=(artist_id, artist_dna), daemon=True,
         ).start()
-    yield
+    import_stop = threading.Event()
+    import_thread = _start_import_worker(import_stop)
+    try:
+        yield
+    finally:
+        import_stop.set()
+        if import_thread:
+            import_thread.join(timeout=2)
 
 
 app = FastAPI(title="StageViva API", version="0.1.0", lifespan=lifespan)
@@ -1134,20 +1144,27 @@ def _match_artist_against_catalogue(
 
 def _match_opportunity_against_registered_artists(
     opportunity_id: str, opportunity: dict[str, Any], storage: StageVivaStorage,
+    *, max_new_matches: int | None = None,
 ) -> dict[str, int]:
     """Refresh all scores after an owner adds or materially corrects a listing."""
-    matched = queued = 0
+    matched = queued = new_matches = 0
     artist_limit = max(1, int(os.getenv("STAGEVIVA_MAX_ARTISTS_PER_OPPORTUNITY", "20")))
     for artist_id, artist_dna in storage.list_registered_artists()[:artist_limit]:
         if storage.cached_match(artist_id, opportunity_id, match_input_signature(artist_dna, opportunity)) is not None:
             matched += 1
             continue
+        if max_new_matches is not None and new_matches >= max_new_matches:
+            return {"matched_artists": matched, "queued_notifications": queued, "remaining": True}
         result = match_artist_to_opportunity(artist_dna, opportunity)
         storage.upsert_match(artist_id, opportunity_id, result)
         matched += 1
+        new_matches += 1
         if _is_actionable_match(result) and result.get("overall", {}).get("recommendation") in {"strong_match", "good_match"}:
             queued += int(storage.queue_notification(artist_id, opportunity_id, result))
-    return {"matched_artists": matched, "queued_notifications": queued}
+    result = {"matched_artists": matched, "queued_notifications": queued}
+    if max_new_matches is not None:
+        result["remaining"] = False
+    return result
 
 
 def _store_and_match_artist(user_id: str, artist_dna: dict[str, Any], storage: StageVivaStorage) -> dict[str, int]:
@@ -1909,6 +1926,111 @@ def _validate_admin_opportunity(
     if duplicate:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail=f"This appears to duplicate {duplicate['title']} and cannot be published twice.")
+
+
+def _run_import_worker(stop: threading.Event) -> None:
+    try:
+        while not stop.is_set():
+            storage = StageVivaStorage(DATABASE_PATH)
+            worked = False
+            try:
+                queue = ImportQueue(storage, IMPORTS_DIR)
+                queue.recover()
+
+                def authorised(owner_id):
+                    user = storage.get_user(owner_id)
+                    return bool(user and _is_admin_user(user))
+
+                job = queue.claim()
+                if job:
+                    queue.process(job, authorised)
+                    worked = True
+                else:
+                    worked = queue.match_one(authorised, lambda oid, opportunity, db:
+                        _match_opportunity_against_registered_artists(oid, opportunity, db, max_new_matches=1))
+            except Exception:
+                logger.exception("Opportunity import worker could not finish its iteration")
+            finally:
+                storage.close()
+            stop.wait(0.1 if worked else 3)
+    finally:
+        import_worker_lock.release()
+
+
+def _start_import_worker(stop: threading.Event | None = None) -> threading.Thread | None:
+    if import_worker_lock.acquire(blocking=False):
+        worker = threading.Thread(target=_run_import_worker, args=(stop or threading.Event(),), daemon=True)
+        try:
+            worker.start()
+        except Exception:
+            import_worker_lock.release()
+            raise
+        return worker
+    return None
+
+
+class ImportRetryRequest(BaseModel):
+    caption: str = Field(default="", max_length=20_000)
+    source_complete: bool = False
+
+
+@app.get("/admin/opportunity-imports")
+def admin_list_imports(admin: AdminUser, storage: Storage) -> list[dict[str, Any]]:
+    return ImportQueue(storage, IMPORTS_DIR).list(admin["id"])
+
+
+@app.post("/admin/opportunity-imports", status_code=202)
+async def admin_create_import(
+    admin: AdminUser, storage: Storage,
+    source_url: Annotated[str, Form(max_length=2048)],
+    request_id: Annotated[str, Form(max_length=100)],
+    caption: Annotated[str, Form(max_length=20_000)] = "",
+    source_complete: Annotated[bool, Form()] = False,
+    screenshots: list[UploadFile] = File(default=[]),
+) -> dict[str, Any]:
+    try:
+        if len(screenshots) > MAX_IMAGES:
+            raise ImportInputError("Attach up to five screenshots per post.")
+        images = []
+        total = 0
+        for image in screenshots:
+            data = await image.read(MAX_IMAGE_BYTES + 1)
+            total += len(data)
+            if len(data) > MAX_IMAGE_BYTES or total > MAX_TOTAL_BYTES:
+                raise ImportInputError("Each screenshot must be under 8 MB, and the total under 20 MB.")
+            images.append(data)
+        result = ImportQueue(storage, IMPORTS_DIR).enqueue(admin["id"], request_id, source_url, caption, source_complete, images)
+    except ImportInputError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    finally:
+        for image in screenshots:
+            await image.close()
+    _start_import_worker()
+    return result
+
+
+@app.post("/admin/opportunity-imports/{job_id}/retry", status_code=202)
+def admin_retry_import(job_id: str, payload: ImportRetryRequest, admin: AdminUser, storage: Storage) -> dict[str, Any]:
+    try:
+        result = ImportQueue(storage, IMPORTS_DIR).retry(job_id, admin["id"], payload.caption, payload.source_complete)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Import not found.") from error
+    except ImportInputError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    _start_import_worker()
+    return result
+
+
+@app.get("/admin/opportunity-imports/{job_id}/screenshots/{index}")
+def admin_import_screenshot(job_id: str, index: int, admin: AdminUser, storage: Storage) -> FileResponse:
+    job = ImportQueue(storage, IMPORTS_DIR).get(job_id, admin["id"])
+    images = json.loads(job["images_json"]) if job else []
+    if index < 0 or index >= len(images):
+        raise HTTPException(status_code=404, detail="Screenshot not found.")
+    path = Path(images[index]).resolve()
+    if path.parent != (IMPORTS_DIR / job_id).resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Screenshot not found.")
+    return FileResponse(path, headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/admin/opportunities")

@@ -819,6 +819,8 @@ def analyse_opportunity(
     client: Optional[OpenAI] = None,
     listing_text: Optional[str] = None,
     previous: Optional[dict[str, Any]] = None,
+    research_urls: Optional[list[str]] = None,
+    listing_text_kind: str = "caption",
 ) -> dict[str, Any]:
     """Fetch a listing, extract text, and return structured JSON."""
 
@@ -834,14 +836,15 @@ def analyse_opportunity(
         )
 
     candidate = extract_official_application_url(page_html, resolved_url) if page_html else ""
-    sources = [{"url": resolved_url, "type": "caption" if listing_text else "listing", "text": page_text[:45_000]}]
+    sources = [{"url": resolved_url, "type": listing_text_kind if listing_text else "listing", "text": page_text[:45_000]}]
     research_error = None
-    if candidate and candidate != resolved_url:
+    candidates = list(dict.fromkeys([candidate, *(research_urls or [])]))
+    for candidate in [value for value in candidates if value and value != resolved_url][:2 if research_urls is not None else 1]:
         try:
             secondary, destination = fetch_public_html(candidate, DEFAULT_HEADERS, timeout=12)
             sources.append({"url": destination, "type": "linked_page", "text": extract_useful_text(secondary, 16_000)})
         except PublicSourceError as error:
-            research_error = str(error)
+            research_error = f"{research_error}; {error}" if research_error else str(error)
     evidence_text = "\n\n".join(f"Source URL: {source['url']}\n{source['text']}" for source in sources)
     fingerprint = hashlib.sha256(evidence_text.encode()).hexdigest()
     if previous and previous.get("stageviva_review", {}).get("content_hash") == fingerprint:

@@ -21,14 +21,16 @@ def _value(opportunity: dict[str, Any], *path: str) -> Any:
 def _parse_date(value: str) -> date | None:
     if not value or value.lower() == "unknown":
         return None
-    # Dateutil otherwise fills in a missing year from the runtime date.
-    year = re.search(r"\b(?:19|20)\d{2}\b", value)
-    if not year or not re.search(r"\b(?:[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\b", value[:year.start()] + value[year.end():]):
-        return None
+    # ISO dates with zero-padded days (for example 2020-01-01) must not be
+    # rejected by the natural-language completeness check below.
     try:
         return date.fromisoformat(value.strip())
     except ValueError:
         pass
+    # Dateutil otherwise fills in a missing year from the runtime date.
+    year = re.search(r"\b(?:19|20)\d{2}\b", value)
+    if not year or not re.search(r"\b(?:[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\b", value[:year.start()] + value[year.end():]):
+        return None
     try:
         parsed = date_parser.parse(value, fuzzy=True, dayfirst=True, default=datetime(2001, 1, 1)).date()
         alternate = date_parser.parse(value, fuzzy=True, dayfirst=True, default=datetime(2002, 2, 2)).date()

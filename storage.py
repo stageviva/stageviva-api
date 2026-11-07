@@ -1484,7 +1484,13 @@ class StageVivaStorage:
         ]
 
     def upsert_opportunity(self, item: DiscoveredOpportunity, opportunity: dict[str, Any], *, hidden_reason: str | None = None) -> str:
-        opportunity_id = _stable_id("opportunity", item.listing_url.rstrip("/").lower())
+        # Instagram shortcodes are case-sensitive. Keep existing IDs stable while
+        # preventing two different posts from colliding after lowercasing.
+        from urllib.parse import urlsplit
+        existing = self.opportunity_by_listing_url(item.listing_url)
+        instagram = (urlsplit(item.listing_url).hostname or "").lower() in {"instagram.com", "www.instagram.com", "m.instagram.com"}
+        identity = item.listing_url.rstrip("/") if instagram else item.listing_url.rstrip("/").lower()
+        opportunity_id = existing["id"] if existing else _stable_id("opportunity", identity)
         now = _utc_now()
         self.connection.execute("""
             INSERT INTO opportunities (id, listing_url, title, source_name, source_url, category,
