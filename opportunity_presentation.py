@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import urlparse
 from opportunity_quality import PATHWAY_LABELS, application_pathway, safe_application_url
@@ -41,6 +42,101 @@ def _known(value: str) -> bool:
         or normalized.startswith("unknown;")
         or normalized.startswith("unknown ")
     )
+
+
+_CURRENCY = re.compile(r"(?:[$€£¥]\s*\d|\b(?:USD|EUR|GBP|CAD|AUD)\s*\d|\b\d[\d,.]*\s*(?:USD|EUR|GBP|CAD|AUD)\b)", re.I)
+_TITLE_METADATA = re.compile(
+    r"\s*(?:[|–—]|\s-\s)?\s*\b(?:application deadline|submission deadline|audition dates?|auditions|"
+    r"salary|pay rate|compensation|dates to be arranged)\s*(?::|$)", re.I,
+)
+_TITLE_SCHEDULE = re.compile(
+    r"\s+[-–—]\s+(?:20\d{2}\s*[-–/]\s*20\d{2}\s+season|[a-z]+\s+20\d{2}\s+start)!?$", re.I,
+)
+_TITLE_WORD = re.compile(r"[^\W\d_]+(?:[’'][^\W\d_]+)?")
+_ACRONYMS = {"ABT", "BBC", "CV", "EU", "GCSE", "ISH", "NYC", "UK", "US", "USA", "UAE"}
+_THEATRE_NAMES = ("Broadway", "West End")
+
+
+def _role_title(
+    title: str, organisation: str, role_summary: str, compensation: str = "", *,
+    preserve_case: bool = False, proper_names: tuple[str, ...] = (),
+) -> str:
+    title = " ".join(title.split()).strip(" -–—|")
+    title = _TITLE_METADATA.split(title, maxsplit=1)[0]
+    title = _TITLE_SCHEDULE.sub("", title)
+    if salary := _CURRENCY.search(title):
+        title = title[:salary.start()]
+    elif amount := re.search(r"\s+(\d[\d,.]*)$", title):
+        normalized_amount = re.sub(r"[,.]", "", amount[1])
+        known_amounts = {re.sub(r"[,.]", "", value) for value in re.findall(r"\d[\d,.]*", compensation)}
+        if normalized_amount in known_amounts:
+            title = title[:amount.start()]
+    title = title.strip(" (:-–—|")
+    title = title if _known(title) else role_summary if _known(role_summary) else ""
+    title = re.sub(r"^(?:casting call|audition)\s*(?:[:–—-]\s*|for\s+(?:an?\s+)?)", "", title, flags=re.I)
+    title = re.sub(r"^seeking\s+|\s+(?:wanted|required|needed)$", "", title, flags=re.I)
+    title = re.sub(r"\b(?:wanted|required|needed)\s+for\b", "for", title, flags=re.I)
+    title = re.sub(r"\s*&\s+(?=\S)", " and ", title)
+    title = re.sub(r"\s+[-–—|]\s+", " — ", title)
+    title = re.sub(r"(?<=\w)-\s+(?=\w)", "-", title)
+
+    def title_word(match: re.Match[str]) -> str:
+        word = match[0]
+        if word.isupper() and len(word) == 2 and title[:match.start()].rstrip().endswith(","):
+            return word
+        if word in _ACRONYMS or (not word.isupper() and not word.islower() and not word.istitle()):
+            return word
+        return word.lower()
+
+    # Legacy headings can contain the only surviving job context. Keep their
+    # descriptive wording while normalising case, rather than reducing them to
+    # a generic role. New extractions are written semantically by the model.
+    formatted = title.strip() if preserve_case else _TITLE_WORD.sub(title_word, title.strip())
+    for name in (organisation, *proper_names):
+        if not _known(name):
+            continue
+        proper_name = name
+        if name.isupper():
+            proper_name = _TITLE_WORD.sub(
+                lambda match: match[0] if match[0] in _ACRONYMS else match[0].capitalize(),
+                name,
+            )
+        formatted = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", lambda _: proper_name, formatted, flags=re.I)
+    for proper_name in _THEATRE_NAMES:
+        formatted = re.sub(rf"\b{re.escape(proper_name)}\b", lambda _: proper_name, formatted, flags=re.I)
+    for quoted in re.findall(r'["“]([^"”]+)["”]', title):
+        proper_name = quoted if not quoted.isupper() else quoted.title()
+        formatted = re.sub(re.escape(quoted), lambda _: proper_name, formatted, flags=re.I)
+    return formatted[:1].upper() + formatted[1:]
+
+
+_REQUIREMENT_PLACEHOLDERS = {"low", "medium", "high", "very_high", "audition", "age", "height", "gender", "nationality"}
+
+
+def _requirement_points(values: list[str]) -> list[str]:
+    points: dict[str, str] = {}
+    for value in values:
+        for line in re.split(r"\r?\n\s*(?=[-*•]|\d+[.)]\s)|•", value):
+            line = " ".join(line.split()).strip(" -–—*·.;")
+            line = re.sub(r"^\d+[.)]\s+", "", line)
+            if not _known(line) or line.casefold() in _REQUIREMENT_PLACEHOLDERS:
+                continue
+            if line.isupper():
+                line = _TITLE_WORD.sub(lambda match: match[0] if match[0] in _ACRONYMS else match[0].lower(), line)
+            line = re.sub(r"\bminimum height\s*:\s*", "minimum height of ", line, flags=re.I)
+            line = line[0].upper() + line[1:]
+            points.setdefault(line.casefold(), line)
+    return list(points.values())
+
+
+def _physical_requirement_point(label: str, value: str) -> str:
+    if label == "Age" and value[0].isdigit():
+        return f"Age {value}"
+    if label == "Height" and value[0].isdigit():
+        return f"Height of {value}"
+    if label == "Casting requirement" and value.casefold() in {"male", "female"}:
+        return f"{value} dancers"
+    return value
 
 
 def _public_url(*candidates: str) -> str:
@@ -127,24 +223,30 @@ def opportunity_card(match_item: dict[str, Any]) -> dict[str, Any]:
     listing_title = field_value(opportunity, "identity", "title")
     description = field_value(opportunity, "identity", "description")
     role_summary = field_value(opportunity, "identity", "opportunity_type")
+    city = field_value(opportunity, "location", "city")
+    country = field_value(opportunity, "location", "country")
+    position = _role_title(
+        listing_title, organisation, role_summary,
+        field_value(opportunity, "contract_and_compensation", "compensation"),
+        preserve_case=opportunity.get("stageviva_review", {}).get("editorial_style") == "sentence_case_with_context_v1",
+        proper_names=(city, country),
+    )
     # A source sometimes reports an internal "unknown; members only" company
     # value. In that case, the listing's own title is still meaningful to a
     # performer and must not be thrown away for a generic placeholder.
     title = (
         organisation if _known(organisation)
-        else listing_title if _known(listing_title)
+        else position if position
         else description if _known(description)
         else "Opportunity details being verified"
     )
     deadline = field_value(opportunity, "dates", "application_deadline")
-    city = field_value(opportunity, "location", "city")
-    country = field_value(opportunity, "location", "country")
     location = ", ".join(part for part in (city, country) if _known(part)) or "Unknown location"
     overall = match_item["match"].get("overall", {})
     assessment = match_item["match"].get("stageviva_assessment", {})
     return {
         "title": title,
-        "position": listing_title if _known(listing_title) else role_summary if _known(role_summary) else "",
+        "position": position,
         "organisation": organisation if _known(organisation) else "",
         "role_summary": role_summary if _known(role_summary) else "Performance opportunity",
         "deadline": "ASAP" if deadline.lower() in {"as soon as possible", "asap"} else deadline if _known(deadline) else "",
@@ -197,6 +299,21 @@ def opportunity_detail(match_item: dict[str, Any], *, legacy_application: bool =
     experience = field_value(requirements, "experience", "required_level")
     if experience.casefold() in {"high", "medium", "low", "very_high", "audition"}:
         experience = ""
+    experience_fields = requirements.get("experience") or {}
+    experience_criteria = [
+        field_value(item, "value") for item in (experience_fields.get("criteria") or [])
+        if isinstance(item, dict)
+    ]
+    styles = _known_list(requirements, "styles")
+    techniques = _known_list(requirements, "techniques")
+    languages = _known_list(requirements, "languages")
+    work_rights = field_value(requirements, "work_rights_or_visa")
+    summary = _requirement_points([
+        *(_physical_requirement_point(item["label"], item["value"]) for item in candidate_requirements),
+        *(_requirement_points(experience_criteria) or [experience]),
+        *styles, *techniques, *languages, work_rights,
+        *_known_list(physical, "other_requirements"),
+    ])
     return {
         "opportunity_id": match_item["opportunity_id"],
         "company": card["organisation"],
@@ -214,12 +331,13 @@ def opportunity_detail(match_item: dict[str, Any], *, legacy_application: bool =
         "contract_duration": field_value(opportunity, "contract_and_compensation", "duration"),
         "compensation": field_value(opportunity, "contract_and_compensation", "compensation") or "Not specified",
         "requirements": {
-            "styles": _known_list(requirements, "styles"),
-            "techniques": _known_list(requirements, "techniques"),
+            "summary": summary,
+            "styles": styles,
+            "techniques": techniques,
             "experience": experience,
-            "work_rights": field_value(requirements, "work_rights_or_visa") or "Not specified",
+            "work_rights": work_rights or "Not specified",
             "physical": candidate_requirements,
-            "languages": _known_list(requirements, "languages"),
+            "languages": languages,
         },
         "application": {
             "method": field_value(application, "method"),

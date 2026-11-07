@@ -66,6 +66,11 @@ def validate_shape(value, schema: dict) -> bool:
 def apply_source_evidence(opportunity: dict, text: str) -> None:
     """Clear extracted facts that have no source excerpt. Preserve their field shape."""
     for field in opportunity.values():
+        if isinstance(field, list):
+            for item in field:
+                if isinstance(item, dict) and "value" in item and "evidence" in item:
+                    apply_source_evidence({"item": item}, text)
+            continue
         if not isinstance(field, dict):
             continue
         if "evidence" not in field:

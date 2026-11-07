@@ -71,6 +71,7 @@ OPPORTUNITY_SCHEMA = _object({
         "techniques": _field(_string_array()),
         "experience": _object({
             "required_level": _field(STRING),
+            "criteria": {"type": "array", "items": _field(STRING)},
             "professional_experience_required": _field(BOOL),
             "roles_or_ranks": _field(_string_array()),
         }),

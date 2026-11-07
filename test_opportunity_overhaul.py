@@ -37,10 +37,11 @@ def field(value, evidence):
     return {"value": value, "evidence": [evidence], "confidence": "high"}
 
 
-def extract(text, decision, *, target="", kind="unverified", source_url="https://example.org/casting/round-2", quote=None, title="Company Dancer"):
+def extract(text, decision, *, target="", kind="unverified", source_url="https://example.org/casting/round-2", quote=None, title="Company Dancer", criteria=()):
     raw = blank(OPPORTUNITY_SCHEMA)
     raw["identity"]["title"] = field(title, text)
     raw["identity"]["organisation"] = field("Example Company", text)
+    raw["requirements"]["experience"]["criteria"] = [field(value, evidence) for value, evidence in criteria]
     raw["classification"].update(
         decision=decision, selection_outcome="Advertised selection outcome", evidence=[quote or text],
         application_kind=kind, application_target=target, application_evidence=[quote or text],
@@ -53,6 +54,15 @@ def extract(text, decision, *, target="", kind="unverified", source_url="https:/
 
 
 class SourceDecisionRegressionTest(unittest.TestCase):
+    def test_editorial_requirements_are_individually_supported(self):
+        role = extract("Requires two years of work experience and a ballet school diploma.", VALID, criteria=(
+            ("At least two years of work experience", "two years of work experience"),
+            ("Ballet school diploma", "a ballet school diploma"),
+            ("Previous soloist experience", "five years as a soloist"),
+        ))
+        detail = opportunity_detail({"opportunity_id": "one", "opportunity": role, "match": {}})
+        self.assertEqual(detail["requirements"]["summary"], ["At least two years of work experience", "Ballet school diploma"])
+
     def test_named_sarajevo_case_rejects_ad_and_uses_theatre_email(self):
         html = '<aside><a href="https://artcasse.com/shop?aff=partner">Shop dancewear</a></aside>'
         self.assertEqual(extract_official_application_url(html, SARAJEVO_LISTING), "")

@@ -68,6 +68,12 @@ def merge_opportunity_updates(opportunity: dict[str, Any], updates: dict[str, An
             set_value(path, updates[key])
     if "official_url" in updates:
         set_value(("source", "official_url"), updates["official_url"])
+    experience_path = ("requirements", "experience")
+    if any(_document_text(result, *experience_path, key) != _document_text(opportunity, *experience_path, key)
+           for key in ("required_level", "professional_experience_required", "roles_or_ranks")):
+        experience = result.get("requirements", {}).get("experience")
+        if isinstance(experience, dict):
+            experience.pop("criteria", None)
     review = result.get("stageviva_review", {})
     pathway = review.get("pathway", {})
     if pathway:
