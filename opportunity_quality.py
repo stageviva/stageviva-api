@@ -131,6 +131,8 @@ def review_reason(opportunity: dict) -> str | None:
         return "non_dancer_opportunity"
     if decision != VALID:
         return "needs_verification"
+    if (review.get("ready_for_publication") is False or review.get("blocking_reasons")) and not review.get("editor_confirmed"):
+        return "needs_verification"
     if not application_pathway(opportunity):
         return "unverified_application"
     if any(str(value_at(opportunity, "identity", key) or "").strip().casefold() in {"", "unknown", "not specified", "n/a"}
@@ -151,4 +153,4 @@ def confirm_editorial_review(opportunity: dict) -> None:
     review = opportunity.setdefault("stageviva_review", {})
     review.setdefault("original_decision", review.get("decision"))
     review.setdefault("original_pathway", review.get("pathway"))
-    review.update(decision=VALID, pathway=pathway, editor_confirmed=True)
+    review.update(decision=VALID, pathway=pathway, editor_confirmed=True, ready_for_publication=True, blocking_reasons=[])

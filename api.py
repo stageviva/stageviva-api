@@ -1953,6 +1953,7 @@ def _run_import_worker(stop: threading.Event) -> None:
                     queue.process(job, authorised)
                     worked = True
                 else:
+                    queue.reconcile_reviews(authorised)
                     worked = queue.match_one(authorised, lambda oid, opportunity, db:
                         _match_opportunity_against_registered_artists(oid, opportunity, db, max_new_matches=1))
             except Exception:

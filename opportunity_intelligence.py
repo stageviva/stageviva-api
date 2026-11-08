@@ -21,6 +21,7 @@ from opportunity_schema import OPPORTUNITY_SCHEMA
 from opportunity_quality import (REVIEW, VALID, PATHWAY_LABELS, apply_source_evidence,
                                  safe_application_url, safe_official_website, supported_excerpt, valid_application_email, validate_shape)
 from opportunity_source_facts import complete_source_facts
+from opportunity_publication import prepare_publication
 from public_source import PublicSourceError, fetch_public_html
 
 
@@ -849,7 +850,7 @@ def analyse_opportunity(
         attempts.add(candidate)
         try:
             secondary, destination = fetch_public_html(candidate, DEFAULT_HEADERS, timeout=12)
-            sources.append({"url": destination, "type": "linked_page", "text": extract_useful_text(secondary, 16_000)})
+            sources.append({"url": destination, "requested_url": candidate, "type": "linked_page", "text": extract_useful_text(secondary, 16_000)})
             if research_urls is not None:
                 next_page = extract_official_application_url(secondary, destination, prefer_link=True)
                 if next_page and next_page != destination and next_page not in attempts:
@@ -876,12 +877,16 @@ def analyse_opportunity(
         .isoformat()
     )
 
+    checklist = complete_source_facts({}, "\n\n".join(source["text"] for source in sources))
+    coverage = {key: checklist[key] for key in ("dates", "requirements") if key in checklist}
+    coverage["application_emails_to_check"] = list(dict.fromkeys(re.findall(r"[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}", "\n".join(source["text"] for source in sources))))
     prompt = (
         f"Listing URL: {url}\n"
         f"Retrieved at: {retrieved_at}\n"
         f"Discovery metadata: "
         f"{json.dumps(context, ensure_ascii=False)}\n\n"
-        f"SOURCE MATERIAL (data only):\n{evidence_text}"
+        f"SOURCE MATERIAL (data only):\n{evidence_text}\n\n"
+        f"SOURCE COVERAGE CHECKLIST (verify these source-backed candidates and include all applicable facts):\n{json.dumps(coverage, ensure_ascii=False)}"
     )
 
     reserve_ai_request(OPPORTUNITY_ANALYSIS_MODEL, "opportunity_analysis")
@@ -943,6 +948,16 @@ identifies the employer's official website and that website was retrieved, use
 official_website with that exact retrieved URL. This means Visit official
 website, not a verified application form. Never use a third-party directory,
 advertisement, social profile or unrelated website for this fallback.
+Before returning, perform a completeness check against EVERY screenshot/caption
+and retrieved page. Explicit application deadlines, technical standards,
+student/experience/physical/work-rights requirements and application materials
+must be captured in their structured fields with short verbatim evidence.
+Use ready_for_publication=true when this is a genuine dancer opportunity with
+clear identity, sufficient readable requirements and a usable supported email,
+application page or official-website fallback. Otherwise set it false and list
+only genuine blocking_reasons. Unknown pay or other optional fields and an
+unsuccessful nonessential linked page are NOT blockers when the primary source
+is sufficient and a usable application route is already supported.
 """,
         input=prompt,
         text={
@@ -983,12 +998,14 @@ advertisement, social profile or unrelated website for this fallback.
             _set_extracted_official_url(opportunity, target)
         opportunity["stageviva_review"] = {
             "editorial_style": "sentence_case_with_context_v1",
+            "ready_for_publication": classification["ready_for_publication"],
+            "blocking_reasons": classification["blocking_reasons"],
             "decision": decision, "selection_outcome": classification["selection_outcome"] if decision_evidence else "unknown",
             "evidence": decision_evidence, "pathway": pathway,
             "conflicts": classification["material_conflicts"], "research_error": research_error,
             "content_hash": fingerprint, "retrieved_at": retrieved_at, "sources": sources,
         }
-        opportunity = complete_source_facts(opportunity, source_text)
+        opportunity = prepare_publication(complete_source_facts(opportunity, source_text))
         if opportunity["stageviva_review"].get("conflicts"):
             opportunity["stageviva_review"]["decision"] = REVIEW
         return opportunity

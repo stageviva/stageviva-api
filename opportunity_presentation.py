@@ -285,6 +285,15 @@ def opportunity_detail(match_item: dict[str, Any], *, legacy_application: bool =
     kind = pathway.get("kind")
     target = pathway.get("target", "")
     source_url = _public_url(match_item.get("listing_url", ""))
+    verification_status = "verified" if pathway else "unavailable"
+    display_label = PATHWAY_LABELS.get(kind, "")
+    # Older records can have a perfectly usable source without the new
+    # extraction metadata. Show it as a source, not as an unverified Apply CTA.
+    if not pathway and not legacy_application and source_url:
+        target = source_url
+        kind = "source_listing"
+        display_label = "View source listing"
+        verification_status = "source_only"
     if (legacy_application and "stageviva_review" not in opportunity
             and safe_application_url(source_url) and not _is_directory_url(source_url)):
         # Installed clients only read application.url. Keep their original
@@ -353,7 +362,8 @@ def opportunity_detail(match_item: dict[str, Any], *, legacy_application: bool =
             "method": field_value(application, "method"),
             "url": target if kind != "email" else "",
             "email": target if kind == "email" else "",
-            "label": PATHWAY_LABELS.get(kind, ""),
+            "label": display_label,
+            "verification_status": verification_status,
             "materials": _known_list(application, "materials"),
         },
         "match": {

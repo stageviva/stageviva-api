@@ -21,10 +21,9 @@ from opportunity_discovery import DiscoveredOpportunity
 from opportunity_intelligence import (
     DEFAULT_HEADERS, analyse_opportunity, extract_official_application_url, extract_useful_text,
 )
-from opportunity_lifecycle import is_current_opportunity
-from opportunity_policy import is_non_performer_opportunity, is_school_or_training_opportunity
 from opportunity_quality import VALID, review_reason, value_at, unwrap_source_urls
 from opportunity_source_facts import complete_source_facts
+from opportunity_publication import PUBLICATION_POLICY, prepare_publication, publication_reason
 from public_source import PublicSourceError, fetch_public_html, public_url
 
 ACTIVE = ("queued", "reading", "analysing", "publishing")
@@ -37,6 +36,14 @@ UPLOAD_PREFIX = "stageviva-upload://"
 
 def screenshot_source(url: str) -> bool:
     return url.startswith(UPLOAD_PREFIX)
+
+
+def _record_hash(opportunity: dict) -> str:
+    snapshot = json.loads(json.dumps(opportunity))
+    review = snapshot.get("stageviva_review", {})
+    review.pop("review_policy", None)
+    review.pop("catalogue_snapshot_hash", None)
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
 
 
 class ImportInputError(ValueError):
@@ -79,6 +86,9 @@ def validate_image(data: bytes) -> str:
 
 def research_links(text: str) -> list[str]:
     links = []
+    # Posters often omit https://. Only infer it for an explicitly labelled
+    # website/application domain, never for an email address or filename.
+    text = re.sub(r"(\b(?:website|official\s+site|apply\s+(?:at|via))\s*:?\s*)(?!https?://|www\.)([A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,63}(?:/[^\s<>\"']*)?)", r"\1https://\2", text, flags=re.I)
     text = unwrap_source_urls(text)
     for match in re.finditer(r"(?:https?://|www\.)[^\s<>\"']+", text):
         url = match.group().rstrip(".,;:!?)\u201d\u2019")
@@ -158,11 +168,13 @@ class ImportQueue:
                 notes.append("The dancer role needs confirmation against the source.")
             if review.get("conflicts"):
                 notes.append("Conflicting source details need checking.")
-            if review.get("research_error"):
+            if review.get("research_error") and review_reason(opportunity) == "unverified_application":
                 notes.append("A linked website could not be read or verified.")
             if review_reason(opportunity) == "unverified_application":
                 notes.append("No application method or official website was verified.")
-            if opportunity.get("overall_confidence") not in {"high", "very_high"}:
+            if review.get("blocking_reasons"):
+                notes.append("Missing information: " + ", ".join(value.replace("_", " ") for value in review["blocking_reasons"]) + ".")
+            if publication_reason(opportunity) == "needs_information" and not review.get("blocking_reasons"):
                 notes.append(f"Extraction confidence is {opportunity.get('overall_confidence', 'unknown').replace('_', ' ')}.")
         return {key: job[key] for key in ("id", "source_url", "status", "message", "opportunity_id", "matching_status", "created_at", "updated_at")} | {
             "message": (job["message"] + " " + " ".join(notes)).strip(),
@@ -349,26 +361,18 @@ class ImportQueue:
                 text, links, kind = self.read_source(job)
                 self.update(job_id, status="analysing", message="Reading the announcement and linked application pages.")
                 opportunity = analyse_opportunity(url, listing_text=text, research_urls=links, listing_text_kind=kind)
+                opportunity = prepare_publication(opportunity, job["reference_url"])
                 if screenshot_source(url):
                     for field in opportunity.get("source", {}).values():
                         if isinstance(field, dict) and str(field.get("value", "")).startswith(UPLOAD_PREFIX):
                             field.update(value="unknown", evidence=[], confidence="unknown")
                 opportunity.setdefault("stageviva_review", {})["import_id"] = job_id
+                opportunity["stageviva_review"]["review_policy"] = PUBLICATION_POLICY
                 self.update(job_id, status="publishing", opportunity_json=json.dumps(opportunity, ensure_ascii=False))
             if not authorised(job["owner_id"]):
                 raise ImportInputError("Administrator access is required to publish this import.")
             review = opportunity.get("stageviva_review", {})
-            reason = review_reason(opportunity)
-            if review.get("decision") != VALID or review.get("conflicts") or review.get("research_error"):
-                reason = reason or "needs_verification"
-            if opportunity.get("overall_confidence") not in {"high", "very_high"}:
-                reason = reason or "needs_verification"
-            if not is_current_opportunity(opportunity):
-                reason = "expired"
-            if is_school_or_training_opportunity(opportunity):
-                reason = "school"
-            if is_non_performer_opportunity(opportunity):
-                reason = "non_dancer_opportunity"
+            reason = publication_reason(opportunity)
             title = str(value_at(opportunity, "identity", "title") or "Imported announcement")
             item = DiscoveredOpportunity(title, url, "StageViva import", job["reference_url"] if screenshot_source(url) else url, "manual")
             # Serialize duplicate check and insert across workers. upsert commits this transaction.
@@ -399,6 +403,58 @@ class ImportQueue:
             self.db.rollback()
             # Provider errors can include signed URLs or private response data.
             self.update(job_id, status="failed", message="The import could not finish. Your input is saved. Retry when ready; a fresh analysis may be needed.")
+
+    def reconcile_reviews(self, authorised):
+        """Recheck saved AI results once per policy version, without AI or HTTP.
+
+        Only untouched automatic review holds belonging to a current admin are
+        eligible. Manual hides, edits, expired rows and duplicates stay intact.
+        """
+        jobs = self.db.execute("""SELECT * FROM opportunity_imports WHERE status='review'
+            AND opportunity_json IS NOT NULL
+            AND COALESCE(json_extract(opportunity_json, '$.stageviva_review.review_policy'), '')<>?
+            ORDER BY created_at LIMIT 10""", (PUBLICATION_POLICY,)).fetchall()
+        released = 0
+        for row in jobs:
+            job = dict(row)
+            original = json.loads(job["opportunity_json"])
+            expected_hash = original.get("stageviva_review", {}).get("catalogue_snapshot_hash") or _record_hash(original)
+            prepared = prepare_publication(original, job["reference_url"])
+            prepared.setdefault("stageviva_review", {})["review_policy"] = PUBLICATION_POLICY
+            prepared["stageviva_review"]["catalogue_snapshot_hash"] = expected_hash
+            current = self.storage.get_opportunity_for_admin(job["opportunity_id"]) if job["opportunity_id"] else None
+            if not current or not authorised(job["owner_id"]):
+                self.update(job["id"], opportunity_json=json.dumps(prepared, ensure_ascii=False))
+                continue
+            ours = current["opportunity"].get("stageviva_review", {}).get("import_id") == job["id"]
+            if not ours:
+                self.update(job["id"], opportunity_json=json.dumps(prepared, ensure_ascii=False))
+                continue
+            if current["visible"]:
+                self.update(job["id"], status="published", matching_status="pending", opportunity_json=json.dumps(current["opportunity"], ensure_ascii=False), message="Published. Preparing matches.")
+                continue
+            if current.get("hidden_reason") not in {"needs_verification", "unverified_application", "needs_information"} or _record_hash(current["opportunity"]) != expected_hash:
+                self.update(job["id"], opportunity_json=json.dumps(prepared, ensure_ascii=False))
+                continue
+            reason = publication_reason(prepared)
+            if reason:
+                self.update(job["id"], opportunity_json=json.dumps(prepared, ensure_ascii=False), message=f"More information needed: {reason.replace('_', ' ')}.")
+                continue
+            self.db.execute("BEGIN IMMEDIATE")
+            latest = self.storage.get_opportunity_for_admin(current["id"])
+            if not latest or latest["visible"] or not authorised(job["owner_id"]) or latest.get("hidden_reason") != current.get("hidden_reason") or latest["opportunity"] != current["opportunity"]:
+                self.db.rollback()
+                continue
+            duplicate = self.storage.duplicate_of({**latest, "opportunity": prepared}, exclude_id=latest["id"])
+            if duplicate:
+                self.storage.hide_opportunity(latest["id"], reason="duplicate")
+                self.update(job["id"], status="duplicate", opportunity_json=json.dumps(prepared, ensure_ascii=False), message="This opportunity is already live in another listing.")
+                continue
+            item = DiscoveredOpportunity(latest["title"], latest["listing_url"], latest["source_name"], latest["source_url"], latest["category"])
+            self.storage.upsert_opportunity(item, prepared)
+            self.update(job["id"], status="published", matching_status="pending", opportunity_json=json.dumps(prepared, ensure_ascii=False), message="Published automatically after rechecking the saved source. Preparing matches.")
+            released += 1
+        return released
 
     def match_one(self, authorised, matcher):
         self.db.execute("BEGIN IMMEDIATE")

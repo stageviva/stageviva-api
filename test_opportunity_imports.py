@@ -126,9 +126,9 @@ class ImportQueueTest(unittest.TestCase):
 
     def test_unverified_conflicting_low_confidence_expired_and_training_stay_hidden(self):
         variants = []
-        for change in ({"decision": "NEEDS_VERIFICATION"}, {"conflicts": ["Conflicting dates"]}, {"research_error": "Blocked page"}, {"pathway": {}}):
+        for change in ({"decision": "NEEDS_VERIFICATION"}, {"conflicts": ["Conflicting dates"]}, {"pathway": {}}, {"ready_for_publication": False, "blocking_reasons": ["critical_requirements_unclear"]}):
             item = ready(); item["stageviva_review"].update(change); variants.append(item)
-        item = ready(); item["overall_confidence"] = "medium"; variants.append(item)
+        item = ready(); item["overall_confidence"] = "low"; item["identity"]["title"]["confidence"] = "low"; variants.append(item)
         item = ready(); item.pop("stageviva_review"); variants.append(item)
         item = ready(); item["dates"]["application_deadline"]["value"] = "2020-01-01"; variants.append(item)
         for index, item in enumerate(variants):
@@ -142,7 +142,7 @@ class ImportQueueTest(unittest.TestCase):
         for policy in ("is_school_or_training_opportunity", "is_non_performer_opportunity"):
             self.ai.return_value = ready()
             self.enqueue(request_id=policy, url=f"https://www.instagram.com/p/{policy}/")
-            with patch("opportunity_imports." + policy, return_value=True): self.assertEqual(self.process()["status"], "review")
+            with patch("opportunity_publication." + policy, return_value=True): self.assertEqual(self.process()["status"], "review")
 
     def test_repeated_source_avoids_paid_analysis_and_preserves_manual_edits(self):
         self.enqueue(); original = self.process()

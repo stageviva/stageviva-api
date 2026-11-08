@@ -121,6 +121,8 @@ OPPORTUNITY_SCHEMA = _object({
     "missing_information": _string_array(),
     "overall_confidence": {"type": "string", "enum": CONFIDENCE_LEVELS},
     "classification": _object({
+        "ready_for_publication": BOOL,
+        "blocking_reasons": {"type": "array", "items": {"type": "string", "enum": ["role_unclear", "identity_missing", "critical_requirements_unclear", "application_missing", "source_conflict", "unreadable_source"]}},
         "decision": {"type": "string", "enum": [
             "VALID_DANCER_OPPORTUNITY", "INVALID_NON_DANCER_OPPORTUNITY", "NEEDS_VERIFICATION",
         ]},

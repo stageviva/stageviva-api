@@ -43,6 +43,7 @@ def extract(text, decision, *, target="", kind="unverified", source_url="https:/
     raw["identity"]["organisation"] = field("Example Company", text)
     raw["requirements"]["experience"]["criteria"] = [field(value, evidence) for value, evidence in criteria]
     raw["classification"].update(
+        ready_for_publication=decision == VALID,
         decision=decision, selection_outcome="Advertised selection outcome", evidence=[quote or text],
         application_kind=kind, application_target=target, application_evidence=[quote or text],
     )

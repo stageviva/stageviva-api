@@ -105,7 +105,8 @@ class OpportunityPresentationTest(unittest.TestCase):
             },
         }
         detail = opportunity_detail(item)
-        self.assertEqual(detail["application"]["url"], "")
+        self.assertEqual(detail["application"]["url"], "https://example.org/audition")
+        self.assertEqual(detail["application"]["label"], "View source listing")
         self.assertEqual(detail["listing_url"], "https://example.org/audition")
         legacy_detail = opportunity_detail(item, legacy_application=True)
         self.assertEqual(legacy_detail["application"]["url"], "https://example.org/audition")
@@ -122,7 +123,9 @@ class OpportunityPresentationTest(unittest.TestCase):
                 "source": {"official_url": {"value": "unknown"}},
             },
         }
-        self.assertEqual(opportunity_detail(item)["application"]["url"], "")
+        self.assertEqual(opportunity_detail(item)["application"]["url"], item["listing_url"])
+        self.assertEqual(opportunity_detail(item)["application"]["label"], "View source listing")
+        self.assertEqual(opportunity_detail(item)["application"]["verification_status"], "source_only")
         self.assertEqual(opportunity_detail(item, legacy_application=True)["application"]["url"], "")
 
     def test_representation_listings_are_an_agency_category(self) -> None:
