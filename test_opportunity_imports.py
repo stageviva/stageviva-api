@@ -36,9 +36,9 @@ def ready():
     }
 
 
-def screenshot():
+def screenshot(color="white"):
     output = io.BytesIO()
-    Image.new("RGB", (300, 400), "white").save(output, format="PNG")
+    Image.new("RGB", (300, 400), color).save(output, format="PNG")
     return output.getvalue()
 
 
@@ -231,6 +231,68 @@ class ImportQueueTest(unittest.TestCase):
         links = research_links("https://127.0.0.1/secret https://instagram.com/p/Test/ https://company.org/contact https://company.org/apply https://company.org/auditions https://company.org/four")
         self.assertEqual(links, ["https://company.org/apply", "https://company.org/auditions"])
 
+    def test_three_screenshots_combine_into_one_opportunity_without_links_or_typed_caption(self):
+        job = self.enqueue(url="", caption="", complete=True, images=[screenshot(), screenshot("blue"), screenshot("red")])
+        with patch("opportunity_imports._extract_image_text", side_effect=[CAPTION, "Dancers require three years of professional experience.", "Include a showreel with your application to casting@example.org."]):
+            result = self.process()
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(self.storage.count("opportunities"), 1)
+        text = self.ai.call_args.kwargs["listing_text"]
+        self.assertIn("three years", text)
+        self.assertIn("showreel", text)
+        self.assertIn("Screenshot 3 of 3", text)
+        self.assertEqual(self.ai.call_args.kwargs["listing_text_kind"], "caption")
+        self.assertEqual(self.ai.call_args.kwargs["research_urls"], [])
+        self.assertEqual(job["source_url"], "")
+        self.assertEqual(self.queue.list("owner")[0]["source_url"], "")
+        item = self.storage.get_opportunity_for_admin(result["opportunity_id"])
+        self.assertEqual(api._admin_opportunity_view(item)["listing_url"], "")
+        self.assertEqual(api._admin_opportunity_view(item)["official_url"], "")
+        self.fetch.assert_not_called()
+        self.ai.assert_called_once()
+
+    def test_same_screenshot_group_reordered_skips_reanalysis(self):
+        images = [screenshot(), screenshot("blue")]
+        self.enqueue(url="", caption="", complete=True, images=images)
+        with patch("opportunity_imports._extract_image_text", return_value=CAPTION): self.process()
+        self.enqueue(request_id="reordered_images", url="", caption="", complete=True, images=list(reversed(images)))
+        self.assertEqual(self.process()["status"], "duplicate")
+        self.ai.assert_called_once()
+
+    def test_optional_website_is_researched_and_does_not_identify_every_role_on_that_site(self):
+        website = "https://company.org/"
+        first = self.enqueue(url="", caption="", complete=True, images=[screenshot()], reference_url=website)
+        second = self.enqueue(request_id="another_casting", url="", caption="", complete=True, images=[screenshot("blue")], reference_url=website)
+        self.assertNotEqual(self.queue.get(first["id"])["source_url"], self.queue.get(second["id"])["source_url"])
+        with patch("opportunity_imports._extract_image_text", return_value=CAPTION): self.process()
+        self.assertEqual(self.ai.call_args.kwargs["research_urls"], [website])
+        self.assertEqual(self.queue.public(self.queue.get(first["id"]))["reference_url"], website)
+        with self.assertRaises(ImportInputError): self.enqueue(url="", images=[screenshot()], reference_url="http://127.0.0.1/secret")
+
+    def test_screenshot_only_needs_completeness_confirmation_before_paid_analysis(self):
+        self.enqueue(url="", caption="", images=[screenshot()])
+        with patch("opportunity_imports._extract_image_text", return_value=CAPTION):
+            self.assertEqual(self.process()["status"], "needs_information")
+        self.ai.assert_not_called()
+        with self.assertRaises(ImportInputError): self.enqueue(url="", images=[])
+
+    def test_old_queue_schema_migrates_without_losing_saved_jobs(self):
+        job = self.enqueue()
+        self.storage.connection.execute("ALTER TABLE opportunity_imports DROP COLUMN reference_url")
+        self.storage.connection.commit()
+        reopened = ImportQueue(self.storage, self.path / "private")
+        self.assertEqual(reopened.get(job["id"])["reference_url"], "")
+        self.assertEqual(reopened.list("owner")[0]["id"], job["id"])
+        self.assertEqual(reopened.enqueue("owner", "request_123", URL, CAPTION, False, [])["id"], job["id"])
+
+    def test_missing_information_retry_can_add_a_website_without_reupload(self):
+        job = self.enqueue(url="", caption="", complete=False, images=[screenshot()])
+        with patch("opportunity_imports._extract_image_text", return_value=CAPTION):
+            self.assertEqual(self.process()["status"], "needs_information")
+            self.queue.retry(job["id"], "owner", "", True, "https://company.org/apply")
+            self.assertEqual(self.process()["status"], "published")
+        self.assertEqual(self.ai.call_args.kwargs["research_urls"], ["https://company.org/apply"])
+
     def test_external_listing_provenance_and_research_survive_budget_retry(self):
         url = "https://company.org/auditions"
         html = f'<main>{CAPTION}<a href="https://company.org/apply/role">Apply for this role</a></main>'
@@ -282,6 +344,31 @@ class ImportApiTest(unittest.TestCase):
         response = self.client.post("/auth/register", json={"email": email, "password": "safe-password-123", "display_name": "Test"})
         self.assertEqual(response.status_code, 201, response.text)
         return {"Authorization": "Bearer " + response.json()["access_token"]}
+
+    def test_screenshot_only_multipart_requires_no_url_and_processes_one_group(self):
+        headers = self.headers("owner@example.com")
+        response = self.client.post("/admin/opportunity-imports", headers=headers,
+            data={"request_id": "screenshot_api_123", "source_complete": "true", "reference_url": "https://example.org/auditions"},
+            files=[("screenshots", ("poster.png", screenshot(), "image/png")), ("screenshots", ("caption.png", screenshot("blue"), "image/png"))])
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["source_url"], "")
+        self.assertEqual(response.json()["screenshot_count"], 2)
+        self.assertEqual(response.json()["reference_url"], "https://example.org/auditions")
+        storage = StageVivaStorage(api.DATABASE_PATH)
+        try:
+            queue = ImportQueue(storage, api.IMPORTS_DIR)
+            with patch("opportunity_imports._extract_image_text", return_value=CAPTION), patch("opportunity_imports.analyse_opportunity", return_value=ready()) as analyser:
+                queue.process(queue.claim(), lambda _: True)
+                analyser.assert_called_once()
+            self.assertEqual(storage.count("opportunities"), 1)
+        finally: storage.close()
+        result = self.client.get("/admin/opportunity-imports", headers=headers).json()[0]
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["source_url"], "")
+        opportunity = self.client.get("/admin/opportunities", headers=headers).json()[0]
+        self.assertEqual(opportunity["listing_url"], "")
+        empty = self.client.post("/admin/opportunity-imports", headers=headers, data={"request_id": "empty_upload_123"})
+        self.assertEqual(empty.status_code, 422)
 
     def test_admin_only_owner_scoped_durable_multipart_and_readonly_polling(self):
         normal, owner, other = [self.headers(email) for email in ("performer@example.com", "owner@example.com", "other@example.com")]

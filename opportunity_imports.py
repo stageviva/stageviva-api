@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import re
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -30,6 +31,11 @@ RETRYABLE = ("needs_information", "failed", "paused", "interrupted")
 MAX_IMAGES = 5
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 20 * 1024 * 1024
+UPLOAD_PREFIX = "stageviva-upload://"
+
+
+def screenshot_source(url: str) -> bool:
+    return url.startswith(UPLOAD_PREFIX)
 
 
 class ImportInputError(ValueError):
@@ -72,8 +78,10 @@ def validate_image(data: bytes) -> str:
 
 def research_links(text: str) -> list[str]:
     links = []
-    for match in re.finditer(r"https?://[^\s<>\"']+", text):
+    for match in re.finditer(r"(?:https?://|www\.)[^\s<>\"']+", text):
         url = match.group().rstrip(".,;:!?)\u201d\u2019")
+        if url.startswith("www."):
+            url = "https://" + url
         host = (urlsplit(url).hostname or "").lower()
         if public_url(url) and not instagram_url(url) and host not in {"facebook.com", "www.facebook.com", "fb.com", "www.fb.com"}:
             if url not in links:
@@ -106,12 +114,20 @@ class ImportQueue:
         self.db.execute("""CREATE TABLE IF NOT EXISTS opportunity_imports (
             id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, request_id TEXT NOT NULL,
             input_hash TEXT NOT NULL, source_url TEXT NOT NULL, caption TEXT NOT NULL,
+            reference_url TEXT NOT NULL DEFAULT '',
             source_complete INTEGER NOT NULL, images_json TEXT NOT NULL,
             status TEXT NOT NULL, message TEXT NOT NULL DEFAULT '', source_text TEXT,
             source_kind TEXT NOT NULL DEFAULT 'caption', research_json TEXT NOT NULL DEFAULT '[]',
             opportunity_json TEXT, opportunity_id TEXT, matching_status TEXT NOT NULL DEFAULT '',
             created_at REAL NOT NULL, updated_at REAL NOT NULL,
             UNIQUE(owner_id, request_id))""")
+        # Existing saved imports survive this additive, restart-safe migration.
+        if "reference_url" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+            try:
+                self.db.execute("ALTER TABLE opportunity_imports ADD COLUMN reference_url TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                if "reference_url" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+                    raise
         self.db.execute("CREATE INDEX IF NOT EXISTS opportunity_import_work ON opportunity_imports(status,created_at)")
         self.db.execute("CREATE INDEX IF NOT EXISTS opportunity_import_source ON opportunity_imports(source_url,status)")
         self.db.commit()
@@ -122,7 +138,7 @@ class ImportQueue:
         return dict(row) if row else None
 
     def update(self, job_id: str, **values):
-        allowed = {"status", "message", "source_text", "source_kind", "research_json", "opportunity_json", "opportunity_id", "matching_status", "caption", "source_complete"}
+        allowed = {"status", "message", "source_text", "source_kind", "research_json", "reference_url", "opportunity_json", "opportunity_id", "matching_status", "caption", "source_complete"}
         if not values.keys() <= allowed:
             raise ValueError("Unsupported import update")
         values["updated_at"] = time.time()
@@ -134,6 +150,8 @@ class ImportQueue:
     def public(job):
         opportunity = json.loads(job["opportunity_json"] or "{}")
         return {key: job[key] for key in ("id", "source_url", "status", "message", "opportunity_id", "matching_status", "created_at", "updated_at")} | {
+            "source_url": "" if screenshot_source(job["source_url"]) else job["source_url"],
+            "reference_url": job["reference_url"],
             "title": value_at(opportunity, "identity", "title") or "",
             "caption": job["caption"], "source_complete": bool(job["source_complete"]),
             "screenshot_count": len(json.loads(job["images_json"])),
@@ -151,15 +169,27 @@ class ImportQueue:
             results.append(self.public(job))
         return results
 
-    def enqueue(self, owner_id: str, request_id: str, url: str, caption: str, complete: bool, images: list[bytes]):
-        url = canonical_source(url)
+    def enqueue(self, owner_id: str, request_id: str, url: str, caption: str, complete: bool, images: list[bytes], reference_url: str = ""):
+        url = canonical_source(url) if url.strip() else ""
+        reference_url = canonical_source(reference_url) if reference_url.strip() else ""
+        if not url and not images:
+            raise ImportInputError("Add at least one screenshot or a post/listing link.")
         caption = caption.strip()
         if len(caption) > 20_000 or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", request_id):
             raise ImportInputError("Use a request ID of 8–100 letters/numbers and a caption under 20,000 characters.")
         if len(images) > MAX_IMAGES or sum(map(len, images)) > MAX_TOTAL_BYTES:
             raise ImportInputError("Attach up to five screenshots, totalling no more than 20 MB.")
         extensions = [validate_image(data) for data in images]
-        fingerprint = hashlib.sha256(json.dumps([url, caption, complete, [hashlib.sha256(data).hexdigest() for data in images]]).encode()).hexdigest()
+        image_hashes = [hashlib.sha256(data).hexdigest() for data in images]
+        if not url:
+            # Private identity, never an application link. Reordered identical
+            # groups can be recognised before OCR or another paid analysis.
+            url = UPLOAD_PREFIX + hashlib.sha256("\n".join(sorted(set(image_hashes))).encode()).hexdigest()
+        fingerprint_values = [url, caption, complete, image_hashes]
+        # Preserve idempotency keys created by the earlier URL-based client.
+        if reference_url:
+            fingerprint_values.append(reference_url)
+        fingerprint = hashlib.sha256(json.dumps(fingerprint_values).encode()).hexdigest()
         existing = self.db.execute("SELECT * FROM opportunity_imports WHERE owner_id=? AND request_id=?", (owner_id, request_id)).fetchone()
         if existing:
             if existing["input_hash"] != fingerprint:
@@ -182,8 +212,8 @@ class ImportQueue:
                 raise ImportInputError("The queue is full. Wait for some imports to finish before adding more.")
             now = time.time()
             self.db.execute("""INSERT INTO opportunity_imports
-                (id,owner_id,request_id,input_hash,source_url,caption,source_complete,images_json,status,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (job_id, owner_id, request_id, fingerprint, url, caption, int(complete), json.dumps(paths), "queued", now, now))
+                (id,owner_id,request_id,input_hash,source_url,caption,source_complete,images_json,status,created_at,updated_at,reference_url)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (job_id, owner_id, request_id, fingerprint, url, caption, int(complete), json.dumps(paths), "queued", now, now, reference_url))
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -198,7 +228,7 @@ class ImportQueue:
             raise
         return self.public(self.get(job_id))
 
-    def retry(self, job_id: str, owner_id: str, caption: str, complete: bool):
+    def retry(self, job_id: str, owner_id: str, caption: str, complete: bool, reference_url: str | None = None):
         job = self.get(job_id, owner_id)
         if not job:
             raise KeyError(job_id)
@@ -208,8 +238,10 @@ class ImportQueue:
             if len(caption) > 20_000:
                 raise ImportInputError("The caption must be under 20,000 characters.")
             # Explicit retries may incur one fresh analysis; interrupted jobs never retry themselves.
-            changed = caption.strip() != job["caption"] or complete != bool(job["source_complete"])
+            reference_url = job["reference_url"] if reference_url is None else canonical_source(reference_url) if reference_url.strip() else ""
+            changed = caption.strip() != job["caption"] or complete != bool(job["source_complete"]) or reference_url != job["reference_url"]
             self.update(job_id, status="queued", message="", caption=caption.strip(), source_complete=int(complete),
+                        reference_url=reference_url,
                         source_text=None if changed else job["source_text"], opportunity_json=None if changed else job["opportunity_json"])
         else:
             raise ImportInputError("This import is already processing or has finished. Open its review instead.")
@@ -246,7 +278,8 @@ class ImportQueue:
         parts = []
         if job["caption"]:
             parts.append("Owner-supplied full caption:\n" + job["caption"])
-        for filename in json.loads(job["images_json"]):
+        filenames = json.loads(job["images_json"])
+        for index, filename in enumerate(filenames):
             path = Path(filename).resolve()
             if path.parent != (self.root / job["id"]).resolve():
                 raise ImportInputError("Screenshot could not be read. Upload it again.")
@@ -256,10 +289,13 @@ class ImportQueue:
                 raise ImportInputError("A screenshot could not be read. Upload a clearer image or remove it and provide the full caption in a new import.") from error
             if len(re.sub(r"\W", "", text)) < 25:
                 raise ImportInputError("A screenshot contains too little readable text. Provide a clearer image.")
-            parts.append("Screenshot text:\n" + text)
-        links = []
+            parts.append(f"Screenshot {index + 1} of {len(filenames)} (same announcement, including caption):\n" + text)
+        links = [job["reference_url"]] if job["reference_url"] else []
         kind = "caption"
-        if not instagram_url(job["source_url"]):
+        if screenshot_source(job["source_url"]):
+            if not (job["caption"] or job["source_complete"]):
+                raise ImportInputError("Confirm the screenshots include the complete announcement and caption, or add the missing text.")
+        elif not instagram_url(job["source_url"]):
             try:
                 html, destination = fetch_public_html(job["source_url"], DEFAULT_HEADERS, timeout=12)
                 text = extract_useful_text(html, 20_000)
@@ -267,7 +303,7 @@ class ImportQueue:
                     raise PublicSourceError("The page contains too little readable text.")
                 parts.append(f"Fetched listing ({destination}):\n{text}")
                 link = extract_official_application_url(html, destination)
-                links = ([link] if link and link != destination else []) + html_research_links(html, destination)
+                links += ([link] if link and link != destination else []) + html_research_links(html, destination)
                 # Only the actual fetched source is eligible as an application destination.
                 kind = "listing" if destination == job["source_url"] else "caption"
             except PublicSourceError as error:
@@ -297,6 +333,10 @@ class ImportQueue:
                 text, links, kind = self.read_source(job)
                 self.update(job_id, status="analysing", message="Reading the announcement and linked application pages.")
                 opportunity = analyse_opportunity(url, listing_text=text, research_urls=links, listing_text_kind=kind)
+                if screenshot_source(url):
+                    for field in opportunity.get("source", {}).values():
+                        if isinstance(field, dict) and str(field.get("value", "")).startswith(UPLOAD_PREFIX):
+                            field.update(value="unknown", evidence=[], confidence="unknown")
                 opportunity.setdefault("stageviva_review", {})["import_id"] = job_id
                 self.update(job_id, status="publishing", opportunity_json=json.dumps(opportunity, ensure_ascii=False))
             if not authorised(job["owner_id"]):
@@ -314,7 +354,7 @@ class ImportQueue:
             if is_non_performer_opportunity(opportunity):
                 reason = "non_dancer_opportunity"
             title = str(value_at(opportunity, "identity", "title") or "Imported announcement")
-            item = DiscoveredOpportunity(title, url, "StageViva import", url, "manual")
+            item = DiscoveredOpportunity(title, url, "StageViva import", job["reference_url"] if screenshot_source(url) else url, "manual")
             # Serialize duplicate check and insert across workers. upsert commits this transaction.
             self.db.execute("BEGIN IMMEDIATE")
             existing = self.storage.opportunity_by_listing_url(url)

@@ -375,5 +375,5 @@ def matches_for_filters(
         # material and editorial notes on the admin side of the API.
         public_opportunity = {key: value for key, value in item["opportunity"].items() if key != "stageviva_review"}
         public_match = {key: value for key, value in item["match"].items() if key != "stageviva_assessment"}
-        result.append({**item, "match": public_match, "opportunity": public_opportunity, "card": card})
+        result.append({**item, "listing_url": _public_url(item.get("listing_url", "")), "match": public_match, "opportunity": public_opportunity, "card": card})
     return result

@@ -53,6 +53,7 @@ from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
 from match_engine import _apply_location_and_work_rights_guard, match_input_signature, reapply_deterministic_match_guards
 from opportunity_quality import review_reason, safe_application_url
+from public_source import public_url
 from match_service import match_artist_to_opportunity
 from native_push_notifications import (
     NativePushConfigurationError,
@@ -61,7 +62,7 @@ from native_push_notifications import (
     send_test_native_push_notification,
 )
 from opportunity_discovery import DiscoveredOpportunity
-from opportunity_imports import ImportInputError, ImportQueue, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_TOTAL_BYTES
+from opportunity_imports import ImportInputError, ImportQueue, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_TOTAL_BYTES, screenshot_source
 from opportunity_intelligence import (
     DiscoveryContext,
     OpportunityFetchError,
@@ -1868,6 +1869,10 @@ def get_opportunity(
 def _admin_opportunity_view(item: dict[str, Any]) -> dict[str, Any]:
     """Flatten the current structured record so every editable field is pre-filled."""
     opportunity = item["opportunity"]
+    official_url = next((value for value in (
+        field_value(opportunity, "application", "application_url"),
+        field_value(opportunity, "source", "official_url"), item["listing_url"],
+    ) if public_url(value)), "")
     return {
         "opportunity_id": item["id"],
         "title": item["title"],
@@ -1875,10 +1880,8 @@ def _admin_opportunity_view(item: dict[str, Any]) -> dict[str, Any]:
         "role_summary": field_value(opportunity, "identity", "opportunity_type"),
         "location": field_value(opportunity, "location", "city"),
         "deadline": field_value(opportunity, "dates", "application_deadline"),
-        "official_url": field_value(opportunity, "application", "application_url")
-        or field_value(opportunity, "source", "official_url")
-        or item["listing_url"],
-        "listing_url": item["listing_url"],
+        "official_url": official_url,
+        "listing_url": "" if screenshot_source(item["listing_url"]) else item["listing_url"],
         "contract_type": field_value(opportunity, "contract_and_compensation", "contract_type"),
         "description": field_value(opportunity, "identity", "description"),
         "country": field_value(opportunity, "location", "country"),
@@ -1972,6 +1975,7 @@ def _start_import_worker(stop: threading.Event | None = None) -> threading.Threa
 class ImportRetryRequest(BaseModel):
     caption: str = Field(default="", max_length=20_000)
     source_complete: bool = False
+    reference_url: str | None = Field(default=None, max_length=2048)
 
 
 @app.get("/admin/opportunity-imports")
@@ -1982,8 +1986,9 @@ def admin_list_imports(admin: AdminUser, storage: Storage) -> list[dict[str, Any
 @app.post("/admin/opportunity-imports", status_code=202)
 async def admin_create_import(
     admin: AdminUser, storage: Storage,
-    source_url: Annotated[str, Form(max_length=2048)],
     request_id: Annotated[str, Form(max_length=100)],
+    source_url: Annotated[str, Form(max_length=2048)] = "",
+    reference_url: Annotated[str, Form(max_length=2048)] = "",
     caption: Annotated[str, Form(max_length=20_000)] = "",
     source_complete: Annotated[bool, Form()] = False,
     screenshots: list[UploadFile] = File(default=[]),
@@ -1999,7 +2004,7 @@ async def admin_create_import(
             if len(data) > MAX_IMAGE_BYTES or total > MAX_TOTAL_BYTES:
                 raise ImportInputError("Each screenshot must be under 8 MB, and the total under 20 MB.")
             images.append(data)
-        result = ImportQueue(storage, IMPORTS_DIR).enqueue(admin["id"], request_id, source_url, caption, source_complete, images)
+        result = ImportQueue(storage, IMPORTS_DIR).enqueue(admin["id"], request_id, source_url, caption, source_complete, images, reference_url)
     except ImportInputError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     finally:
@@ -2012,7 +2017,7 @@ async def admin_create_import(
 @app.post("/admin/opportunity-imports/{job_id}/retry", status_code=202)
 def admin_retry_import(job_id: str, payload: ImportRetryRequest, admin: AdminUser, storage: Storage) -> dict[str, Any]:
     try:
-        result = ImportQueue(storage, IMPORTS_DIR).retry(job_id, admin["id"], payload.caption, payload.source_complete)
+        result = ImportQueue(storage, IMPORTS_DIR).retry(job_id, admin["id"], payload.caption, payload.source_complete, payload.reference_url)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Import not found.") from error
     except ImportInputError as error:
