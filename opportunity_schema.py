@@ -127,7 +127,7 @@ OPPORTUNITY_SCHEMA = _object({
         "selection_outcome": STRING,
         "evidence": _string_array(),
         "application_kind": {"type": "string", "enum": [
-            "direct_form", "official_announcement", "email", "relevant_listing", "unverified",
+            "direct_form", "official_announcement", "email", "relevant_listing", "official_website", "unverified",
         ]},
         "application_target": STRING,
         "application_evidence": _string_array(),

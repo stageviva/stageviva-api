@@ -53,6 +53,7 @@ from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
 from match_engine import _apply_location_and_work_rights_guard, match_input_signature, reapply_deterministic_match_guards
 from opportunity_quality import review_reason, safe_application_url
+from opportunity_source_facts import complete_source_facts
 from public_source import public_url
 from match_service import match_artist_to_opportunity
 from native_push_notifications import (
@@ -696,7 +697,10 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "stageviva-api"}
+    payload = {"status": "ok", "service": "stageviva-api"}
+    if revision := os.getenv("RENDER_GIT_COMMIT", ""):
+        payload["revision"] = revision[:12]
+    return payload
 
 
 @app.get("/sources")
@@ -1868,7 +1872,7 @@ def get_opportunity(
 
 def _admin_opportunity_view(item: dict[str, Any]) -> dict[str, Any]:
     """Flatten the current structured record so every editable field is pre-filled."""
-    opportunity = item["opportunity"]
+    opportunity = complete_source_facts(item["opportunity"])
     official_url = next((value for value in (
         field_value(opportunity, "application", "application_url"),
         field_value(opportunity, "source", "official_url"), item["listing_url"],

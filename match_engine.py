@@ -24,6 +24,7 @@ from openai import OpenAI
 from ai_safety import reserve_ai_request
 from match_schema import MATCH_SCHEMA
 from opportunity_quality import validate_shape
+from opportunity_source_facts import complete_source_facts
 
 
 # Matching runs once per visible opportunity after a CV upload. Use the fast
@@ -833,8 +834,9 @@ def _apply_requirement_guards(
     This is a general evidence rule, not a hand-tuned adjustment for individual
     auditions. The model still performs the full comparison and explanation.
     """
+    result = _apply_technique_level_guard(artist_dna, opportunity, result)
     artist_levels = {
-        str(item.get("discipline", "")).strip().lower(): str(item.get("level", "unknown")).lower()
+        str(item.get("discipline", "")).strip().lower(): ("unknown" if item.get("confidence") in {"low", "unknown"} else str(item.get("level", "unknown")).lower())
         for item in artist_dna.get("disciplines", [])
         if isinstance(item, dict)
     }
@@ -872,12 +874,11 @@ def _apply_requirement_guards(
         cap = 55 if highest_other_requirement >= 3 else 65
     overall = result.setdefault("overall", {})
     score = int(overall.get("match_score", 0) or 0)
-    if score <= cap:
-        return result
-
-    overall["match_score"] = cap
-    overall["match_level"] = "weak" if cap <= 45 else "moderate"
-    overall["recommendation"] = "weak_match" if cap <= 45 else "possible_match"
+    if score > cap:
+        overall["match_score"] = cap
+        overall["match_level"] = "weak" if cap <= 45 else "moderate"
+        overall["recommendation"] = "weak_match" if cap <= 45 else "possible_match"
+        overall["summary"] = "A required skill is not evidenced at the needed level in your current profile."
     missing = absent_essential + absent_other_required
     missing_names = ", ".join(name.replace("_", " ") for name, _ in missing)
     gap_text = f"This opportunity explicitly requires {missing_names}, which is not evidenced in the current Artist DNA."
@@ -889,6 +890,25 @@ def _apply_requirement_guards(
             "evidence": [],
             "severity": "major" if cap <= 45 else "moderate",
         })
+    return result
+
+
+def _apply_technique_level_guard(artist: dict, opportunity: dict, result: dict) -> dict:
+    profiles = {item.get("discipline"): item for item in artist.get("disciplines", []) if isinstance(item, dict)}
+    for name, requirement in opportunity.get("requirements", {}).get("discipline_requirements", {}).items():
+        if not isinstance(requirement, dict) or not requirement.get("evidence"):
+            continue
+        required = _LEVEL_RANK.get(requirement.get("required_level"), 0)
+        profile = profiles.get(name, {})
+        actual = _LEVEL_RANK.get(profile.get("level"), 0)
+        if required < 3 or not actual or actual >= required:
+            continue
+        cap = 45 if required - actual >= 2 else 65
+        overall = result.setdefault("overall", {})
+        if int(overall.get("match_score", 0) or 0) > cap:
+            overall.update(match_score=cap, match_level="weak" if cap <= 45 else "moderate", recommendation="weak_match" if cap <= 45 else "possible_match",
+                           summary="The role requires a higher documented technique level than your current profile shows.")
+        _add_gap(result, factor="Required technique level", description=f"The role requires {requirement['required_level'].replace('_', ' ')} {name.replace('_', ' ')}; your profile records {profile['level'].replace('_', ' ')}.")
     return result
 
 
@@ -914,17 +934,19 @@ def match_input_signature(artist_dna: dict[str, Any], opportunity: dict[str, Any
 
 
 def _match_opportunity_input(opportunity: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in opportunity.items() if key not in {"stageviva_review", "stageviva_admin", "source"}}
+    return {key: value for key, value in complete_source_facts(opportunity).items() if key not in {"stageviva_review", "stageviva_admin", "source"}}
 
 
 def _assessment(artist: dict, opportunity: dict, result: dict) -> dict:
     """Add factual eligibility separately from the model's competitiveness estimate."""
     prior = result.get("stageviva_assessment", {})
+    opportunity = complete_source_facts(opportunity)
     overall = result.setdefault("overall", {})
     model_overall = prior.get("model_overall", dict(overall))
     overall.update(model_overall)
     result["gaps"] = [gap for gap in result.get("gaps", [])
-                      if gap.get("factor") not in {"Mandatory height", "Gender requirement", "Work rights and visa", "Preferred work location"}]
+                      if gap.get("factor") not in {"Mandatory height", "Gender requirement", "Work rights and visa", "Preferred work location", "Required skill not evidenced", "Required technique level", "Student enrolment"}]
+    result = _apply_requirement_guards(artist, opportunity, result)
     result = _apply_location_and_work_rights_guard(artist, opportunity, result)
     result = _apply_gender_requirement_guard(artist, opportunity, result)
     height = _field_text(opportunity, "requirements", "physical", "height_requirement")
@@ -936,6 +958,21 @@ def _assessment(artist: dict, opportunity: dict, result: dict) -> dict:
     artist_gender = _normalise_artist_gender(artist.get("identity", {}).get("gender"))
     warning = ""
     checks = []
+    criteria = opportunity.get("requirements", {}).get("experience", {}).get("criteria", [])
+    for criterion in criteria:
+        text = str(criterion.get("value", "")) if isinstance(criterion, dict) else ""
+        year = re.search(r"graduating\s+in\s+\w+\s+(20\d{2})", text, re.I)
+        if not year or not re.search(r"enroll?ed", text, re.I):
+            continue
+        enrolled = any(isinstance(training, dict)
+            and re.search(r"\b(current|ongoing|enrolled|in progress)\b", str(training.get("status", "")), re.I)
+            and year[1] in str(training.get("end_date", "")) for training in artist.get("training", []))
+        if not enrolled:
+            message = f"Confirm this student requirement: {text}"
+            checks.append(message)
+            _add_gap(result, factor="Student enrolment", description=message)
+            if int(overall.get("match_score", 0) or 0) > 65:
+                overall.update(match_score=65, match_level="moderate", recommendation="possible_match", summary="Confirm the required school enrolment and graduation date before applying.")
     if minimum and not re.search(r"\b(preferred|ideally|desirable|approx(?:imately)?)\b", height, re.I):
         threshold = int(minimum.group(1) or minimum.group(2))
         # A multi-part or role-specific criterion needs human interpretation.

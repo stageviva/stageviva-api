@@ -23,7 +23,8 @@ from opportunity_intelligence import (
 )
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_policy import is_non_performer_opportunity, is_school_or_training_opportunity
-from opportunity_quality import VALID, review_reason, value_at
+from opportunity_quality import VALID, review_reason, value_at, unwrap_source_urls
+from opportunity_source_facts import complete_source_facts
 from public_source import PublicSourceError, fetch_public_html, public_url
 
 ACTIVE = ("queued", "reading", "analysing", "publishing")
@@ -78,6 +79,7 @@ def validate_image(data: bytes) -> str:
 
 def research_links(text: str) -> list[str]:
     links = []
+    text = unwrap_source_urls(text)
     for match in re.finditer(r"(?:https?://|www\.)[^\s<>\"']+", text):
         url = match.group().rstrip(".,;:!?)\u201d\u2019")
         if url.startswith("www."):
@@ -148,8 +150,22 @@ class ImportQueue:
 
     @staticmethod
     def public(job):
-        opportunity = json.loads(job["opportunity_json"] or "{}")
+        opportunity = complete_source_facts(json.loads(job["opportunity_json"] or "{}"))
+        notes = []
+        review = opportunity.get("stageviva_review", {})
+        if job["status"] == "review":
+            if review.get("decision") != VALID:
+                notes.append("The dancer role needs confirmation against the source.")
+            if review.get("conflicts"):
+                notes.append("Conflicting source details need checking.")
+            if review.get("research_error"):
+                notes.append("A linked website could not be read or verified.")
+            if review_reason(opportunity) == "unverified_application":
+                notes.append("No application method or official website was verified.")
+            if opportunity.get("overall_confidence") not in {"high", "very_high"}:
+                notes.append(f"Extraction confidence is {opportunity.get('overall_confidence', 'unknown').replace('_', ' ')}.")
         return {key: job[key] for key in ("id", "source_url", "status", "message", "opportunity_id", "matching_status", "created_at", "updated_at")} | {
+            "message": (job["message"] + " " + " ".join(notes)).strip(),
             "source_url": "" if screenshot_source(job["source_url"]) else job["source_url"],
             "reference_url": job["reference_url"],
             "title": value_at(opportunity, "identity", "title") or "",

@@ -1,6 +1,7 @@
 """Evidence and publication rules shared by extraction, review and presentation."""
 
 import re
+import unicodedata
 from urllib.parse import parse_qsl, urlsplit
 
 from public_source import public_url
@@ -14,6 +15,7 @@ PATHWAY_LABELS = {
     "official_announcement": "View Official Audition",
     "email": "Apply by Email",
     "relevant_listing": "View Application Instructions",
+    "official_website": "Visit official website",
 }
 
 
@@ -41,8 +43,26 @@ def valid_application_email(address: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}", address))
 
 
+def unwrap_source_urls(text: str) -> str:
+    """Join a URL wrapped at a delimiter, preserving a genuine path hyphen."""
+    return re.sub(r"((?:https?://|www\.)[^\s<>\"']*[-/?=&])\r?\n[ \t]*([A-Za-z0-9][A-Za-z0-9._~%/?=&+#-]*)[ \t]*(?=\r?$|\n)", r"\1\2", text, flags=re.M)
+
+
+def safe_official_website(url: str) -> bool:
+    if not public_url(url):
+        return False
+    target = urlsplit(url)
+    host = (target.hostname or "").lower().removeprefix("www.")
+    if any(key.casefold() in {"aff", "affiliate", "aff_id"} for key, _ in parse_qsl(target.query)):
+        return False
+    if target.path.strip("/").casefold() in {"privacy", "privacy-policy", "terms", "terms-and-conditions", "cookies"}:
+        return False
+    return (host not in {"instagram.com", "facebook.com", "balletplaces.com", "danceeurope.net", "ballee.co", "allcasting.com", "entertainersworldwidejobs.com"}
+            and (not target.path.strip("/") or safe_application_url(url)))
+
+
 def supported_excerpt(excerpt: str, source_text: str) -> bool:
-    normalize = lambda value: " ".join(value.casefold().split())
+    normalize = lambda value: " ".join(unwrap_source_urls(unicodedata.normalize("NFKC", value).replace("\u00ad", "")).casefold().split())
     quote = normalize(excerpt)
     return len(quote) >= 4 and quote in normalize(source_text)
 
@@ -94,7 +114,9 @@ def application_pathway(opportunity: dict) -> dict:
     target = pathway.get("target", "")
     if kind == "email" and isinstance(target, str) and valid_application_email(target):
         return pathway
-    if kind in PATHWAY_LABELS and kind != "email" and isinstance(target, str) and safe_application_url(target):
+    if kind == "official_website" and isinstance(target, str) and safe_official_website(target):
+        return pathway
+    if kind in PATHWAY_LABELS and kind not in {"email", "official_website"} and isinstance(target, str) and safe_application_url(target):
         return pathway
     return {}
 

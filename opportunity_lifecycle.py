@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from dateutil import parser as date_parser
+from opportunity_source_facts import complete_source_facts
 
 
 def _value(opportunity: dict[str, Any], *path: str) -> Any:
@@ -41,7 +42,7 @@ def _parse_date(value: str) -> date | None:
 
 def opportunity_deadline(opportunity: dict[str, Any]) -> date | None:
     """Return a usable application deadline for reminders and calendars."""
-    deadline = _value(opportunity, "dates", "application_deadline", "value")
+    deadline = _value(complete_source_facts(opportunity), "dates", "application_deadline", "value")
     return _parse_date(deadline.split(";", 1)[0]) if isinstance(deadline, str) else None
 
 

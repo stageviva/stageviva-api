@@ -6,6 +6,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 from opportunity_quality import PATHWAY_LABELS, application_pathway, safe_application_url
+from opportunity_source_facts import complete_source_facts
 
 
 _DIRECTORY_DOMAINS = frozenset({
@@ -212,13 +213,13 @@ def opportunity_track(opportunity: dict[str, Any]) -> str:
     )).lower()
     if any(marker in text for marker in ("agency", "agent", "representation", "talent management")):
         return "agency"
-    if any(marker in text for marker in ("apprentice", "apprenticeship", "trainee", "young artist", "young-artist", "pre-professional")):
+    if any(marker in text for marker in ("apprentice", "apprenticeship", "internship", "trainee", "young artist", "young-artist", "pre-professional")):
         return "apprenticeship"
     return "contract"
 
 
 def opportunity_card(match_item: dict[str, Any]) -> dict[str, Any]:
-    opportunity = match_item["opportunity"]
+    opportunity = complete_source_facts(match_item["opportunity"])
     organisation = field_value(opportunity, "identity", "organisation")
     listing_title = field_value(opportunity, "identity", "title")
     description = field_value(opportunity, "identity", "description")
@@ -275,7 +276,7 @@ def _known_list(document: dict[str, Any], *path: str) -> list[str]:
 
 def opportunity_detail(match_item: dict[str, Any], *, legacy_application: bool = False) -> dict[str, Any]:
     """A performer-facing detail view; never leak the extraction schema."""
-    opportunity = match_item["opportunity"]
+    opportunity = complete_source_facts(match_item["opportunity"])
     card = opportunity_card(match_item)
     match = match_item.get("match", {})
     requirements = opportunity.get("requirements", {})
@@ -308,10 +309,19 @@ def opportunity_detail(match_item: dict[str, Any], *, legacy_application: bool =
     techniques = _known_list(requirements, "techniques")
     languages = _known_list(requirements, "languages")
     work_rights = field_value(requirements, "work_rights_or_visa")
+    level_labels = {"very_high": "Exceptional", "high": "Advanced", "medium": "Intermediate", "low": "Basic"}
+    discipline_points = []
+    for name, requirement in (requirements.get("discipline_requirements") or {}).items():
+        if not isinstance(requirement, dict) or not requirement.get("evidence"):
+            continue
+        label = level_labels.get(requirement.get("required_level"))
+        if label:
+            discipline = {"classical_ballet": "classical ballet"}.get(name, name.replace("_", " "))
+            discipline_points.append(f"{label} {discipline} technique")
     summary = _requirement_points([
         *(_physical_requirement_point(item["label"], item["value"]) for item in candidate_requirements),
         *(_requirement_points(experience_criteria) or [experience]),
-        *styles, *techniques, *languages, work_rights,
+        *discipline_points, *styles, *techniques, *languages, work_rights,
         *_known_list(physical, "other_requirements"),
     ])
     return {
