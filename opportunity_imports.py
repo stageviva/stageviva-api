@@ -111,7 +111,7 @@ def html_research_links(html: str, base_url: str) -> list[str]:
     for anchor in soup.find_all("a", href=True):
         url = urljoin(base_url, str(anchor["href"]).strip())
         label = anchor.get_text(" ", strip=True)
-        if url == base_url or not re.search(r"\b(apply|application|audition|casting|official announcement|vacancy)\b", label, re.I):
+        if url == base_url or not re.search(r"\b(apply(?:ing)?|applications?|audition|casting|official announcement|vacancy)\b", label, re.I):
             continue
         if research_links(url) and url not in candidates:
             candidates.append(url)

@@ -80,7 +80,7 @@ def _is_directory_url(url: str) -> bool:
     return host in _DIRECTORY_DOMAINS
 
 
-def extract_official_application_url(html: str, listing_url: str, *, prefer_link: bool = False) -> str:
+def extract_official_application_url(html: str, listing_url: str, *, prefer_link: bool = False, role_text: str = "") -> str:
     """Find a candidate for research. Its destination still needs verification."""
     if not prefer_link and not _is_directory_url(listing_url):
         return listing_url if safe_application_url(listing_url) else ""
@@ -93,9 +93,17 @@ def extract_official_application_url(html: str, listing_url: str, *, prefer_link
         if not safe_application_url(href) or _is_directory_url(href):
             continue
         text = link.get_text(" ", strip=True).lower()
-        if not re.search(r"\b(apply|application|official audition|official announcement|vacancy|casting)\b", text):
+        if not re.search(r"\b(apply(?:ing)?|applications?|official audition|official announcement|vacancy|casting)\b", text):
             continue
         score = 10
+        # A company page may link both company contracts and youth programmes.
+        # Research the advertised track rather than sorting opaque form IDs.
+        if role_text:
+            youth = r"\b(young|youth|junior|trainee|apprentice|intern(?:ship)?)\b"
+            if re.search(youth, text) and not re.search(youth, role_text, re.I):
+                continue
+            if re.search(youth, text) and re.search(youth, role_text, re.I):
+                score += 8
         if any(word in href.lower() for word in ("apply", "application", "audition", "career", "jobs", "casting")):
             score += 4
         candidates.append((score, href))
@@ -177,7 +185,7 @@ def extract_useful_text(
             if valid_application_email(address):
                 anchor.append(" " + address)
         elif safe_application_url(href) or safe_official_website(href):
-            if re.search(r"\b(apply|application|audition|casting|official website)\b", anchor.get_text(" ", strip=True), re.I):
+            if re.search(r"\b(apply(?:ing)?|applications?|audition|casting|official website)\b", anchor.get_text(" ", strip=True), re.I):
                 anchor.append(" " + href)
     seen: set[str] = set()
     lines = []
@@ -863,7 +871,7 @@ def analyse_opportunity(
             secondary, destination = fetch_public_html(candidate, DEFAULT_HEADERS, timeout=12)
             sources.append({"url": destination, "requested_url": candidate, "type": "linked_page", "text": extract_useful_text(secondary, 16_000)})
             if research_urls is not None:
-                next_page = extract_official_application_url(secondary, destination, prefer_link=True)
+                next_page = extract_official_application_url(secondary, destination, prefer_link=True, role_text=page_text)
                 if next_page and next_page != destination and next_page not in attempts:
                     candidates.append(next_page)
         except PublicSourceError as error:

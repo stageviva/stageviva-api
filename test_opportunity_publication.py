@@ -11,7 +11,7 @@ from opportunity_imports import ImportQueue, research_links
 from opportunity_publication import prepare_publication, publication_reason
 from opportunity_presentation import opportunity_detail
 from opportunity_quality import application_pathway, confirm_editorial_review, supported_excerpt
-from opportunity_intelligence import extract_useful_text
+from opportunity_intelligence import extract_useful_text, extract_official_application_url
 from opportunity_imports import ImportInputError
 from storage import merge_opportunity_updates
 from opportunity_source_facts import complete_source_facts
@@ -36,6 +36,12 @@ class PublicationPolicyTest(unittest.TestCase):
         self.assertIn("https://company.org/auditions/apply", text)
         self.assertIn("casting@company.org", text)
         self.assertNotIn("subject=Audition", text)
+
+    def test_company_contract_research_does_not_pick_the_separate_youth_application(self):
+        html = '<a href="https://forms.example.org/z-company">Read more about applying to the ballet here</a><a href="https://forms.example.org/a-youth">Read more about applying to the Young Dancers programme here</a>'
+        self.assertEqual(extract_official_application_url(html, "https://company.org/", prefer_link=True, role_text="Ballet company dancers for full-time contracts"), "https://forms.example.org/z-company")
+        self.assertEqual(extract_official_application_url(html, "https://company.org/", prefer_link=True, role_text="Young dancers youth programme audition"), "https://forms.example.org/a-youth")
+        self.assertIn("https://forms.example.org/z-company", extract_useful_text(html))
 
     def test_official_website_fallback_survives_visibility_and_editor_confirmation(self):
         document = ready()
