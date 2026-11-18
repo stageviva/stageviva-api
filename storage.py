@@ -78,7 +78,12 @@ def merge_opportunity_updates(opportunity: dict[str, Any], updates: dict[str, An
     pathway = review.get("pathway", {})
     if pathway:
         path = ("application", "email" if pathway["kind"] == "email" else "application_url")
-        if _document_text(result, *path) != pathway.get("target"):
+        target = _document_text(result, *path)
+        if (pathway["kind"] == "official_website"
+                and target == _document_text(opportunity, *path)
+                and target in {"", "unknown"}):
+            target = _document_text(result, "source", "official_url")
+        if target != pathway.get("target"):
             review["previous_pathway"] = review.pop("pathway")
     if updates.get("review_confirmed"):
         from opportunity_quality import confirm_editorial_review
@@ -591,13 +596,14 @@ class StageVivaStorage:
     def opportunity_by_listing_url(self, listing_url: str) -> dict[str, Any] | None:
         """Return an existing catalogue row for a rolling official listing."""
         row = self.connection.execute("""
-            SELECT id, visible, opportunity_json FROM opportunities WHERE listing_url = ?
+            SELECT id, visible, hidden_reason, opportunity_json FROM opportunities WHERE listing_url = ?
         """, (listing_url,)).fetchone()
         if not row:
             return None
         return {
             "id": str(row["id"]),
             "visible": bool(row["visible"]),
+            "hidden_reason": row["hidden_reason"],
             "opportunity": json.loads(row["opportunity_json"]),
         }
 

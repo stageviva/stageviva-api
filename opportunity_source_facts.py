@@ -19,7 +19,7 @@ LEVELS = {"excellent": "high", "advanced": "high", "strong": "high", "exceptiona
 DISCIPLINES = {"classical": "classical_ballet", "classical ballet": "classical_ballet", "ballet": "classical_ballet", "contemporary": "contemporary", "jazz": "jazz", "improvisation": "improvisation", "tap": "tap", "partnering": "partnering", "acrobatics": "acrobatics"}
 NAMES = r"(?:classical(?:\s+ballet)?|ballet|contemporary|jazz|improvisation|tap|partnering|acrobatics)\b"
 GROUP = rf"{NAMES}(?:\s*(?:and|/|&|,)\s*{NAMES})*"
-TECHNIQUE = re.compile(rf"\b(?P<level>{'|'.join(LEVELS)})\s+(?:(?:technique|skills?)\s*\(\s*(?P<bracket>{GROUP})\s*\)|(?P<plain>{GROUP})(?:\s+(?:technique|skills?))?)", re.I)
+TECHNIQUE = re.compile(rf"\b(?P<level>{'|'.join(LEVELS)})\s+(?:(?:foundation|background|base)\s+in\s+(?:both\s+)?)?(?:(?:technique|skills?)\s*\(\s*(?P<bracket>{GROUP})\s*\)|(?P<plain>{GROUP})(?:\s+(?:techniques?|skills?))?)", re.I)
 
 
 def known(value):

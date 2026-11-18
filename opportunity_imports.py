@@ -21,13 +21,13 @@ from opportunity_discovery import DiscoveredOpportunity
 from opportunity_intelligence import (
     DEFAULT_HEADERS, analyse_opportunity, extract_official_application_url, extract_useful_text,
 )
-from opportunity_quality import VALID, review_reason, value_at, unwrap_source_urls
+from opportunity_quality import VALID, application_pathway, review_reason, value_at, unwrap_source_urls
 from opportunity_source_facts import complete_source_facts
 from opportunity_publication import PUBLICATION_POLICY, prepare_publication, publication_reason
 from public_source import PublicSourceError, fetch_public_html, public_url
 
 ACTIVE = ("queued", "reading", "analysing", "publishing")
-RETRYABLE = ("needs_information", "failed", "paused", "interrupted")
+RETRYABLE = ("needs_information", "failed", "paused", "interrupted", "review")
 MAX_IMAGES = 5
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 20 * 1024 * 1024
@@ -141,6 +141,12 @@ class ImportQueue:
                 if "reference_url" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
                     raise
         self.db.execute("CREATE INDEX IF NOT EXISTS opportunity_import_work ON opportunity_imports(status,created_at)")
+        if "replacement_hash" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+            try:
+                self.db.execute("ALTER TABLE opportunity_imports ADD COLUMN replacement_hash TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                if "replacement_hash" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+                    raise
         self.db.execute("CREATE INDEX IF NOT EXISTS opportunity_import_source ON opportunity_imports(source_url,status)")
         self.db.commit()
 
@@ -150,7 +156,7 @@ class ImportQueue:
         return dict(row) if row else None
 
     def update(self, job_id: str, **values):
-        allowed = {"status", "message", "source_text", "source_kind", "research_json", "reference_url", "opportunity_json", "opportunity_id", "matching_status", "caption", "source_complete"}
+        allowed = {"status", "message", "source_text", "source_kind", "research_json", "reference_url", "opportunity_json", "opportunity_id", "matching_status", "caption", "source_complete", "replacement_hash"}
         if not values.keys() <= allowed:
             raise ValueError("Unsupported import update")
         values["updated_at"] = time.time()
@@ -164,6 +170,11 @@ class ImportQueue:
         notes = []
         review = opportunity.get("stageviva_review", {})
         if job["status"] == "review":
+            for key, label in (("title", "job title"), ("organisation", "employer name")):
+                if str(value_at(opportunity, "identity", key) or "").strip().casefold() in {"", "unknown", "not specified", "n/a"}:
+                    notes.append(f"The {label} was not captured. Add the missing announcement text below and reanalyse.")
+            if not application_pathway(opportunity):
+                notes.append("Add the official website/application link below, or the application email and instructions, then reanalyse.")
             if review.get("decision") != VALID:
                 notes.append("The dancer role needs confirmation against the source.")
             if review.get("conflicts"):
@@ -268,9 +279,21 @@ class ImportQueue:
             # Explicit retries may incur one fresh analysis; interrupted jobs never retry themselves.
             reference_url = job["reference_url"] if reference_url is None else canonical_source(reference_url) if reference_url.strip() else ""
             changed = caption.strip() != job["caption"] or complete != bool(job["source_complete"]) or reference_url != job["reference_url"]
+            replacement_hash = job.get("replacement_hash", "")
+            if job["opportunity_id"]:
+                current = self.storage.get_opportunity_for_admin(job["opportunity_id"])
+                original = json.loads(job["opportunity_json"] or "{}")
+                expected = replacement_hash or original.get("stageviva_review", {}).get("catalogue_snapshot_hash") or _record_hash(original)
+                if (not current or current["visible"]
+                        or current.get("hidden_reason") not in {"needs_verification", "unverified_application", "needs_information", "source_conflict"}
+                        or current["opportunity"].get("stageviva_review", {}).get("import_id") != job_id
+                        or _record_hash(current["opportunity"]) != expected):
+                    raise ImportInputError("This saved opportunity was edited, hidden manually or published. Open the saved opportunity to preserve those changes.")
+                replacement_hash = _record_hash(current["opportunity"])
             self.update(job_id, status="queued", message="", caption=caption.strip(), source_complete=int(complete),
                         reference_url=reference_url,
-                        source_text=None if changed else job["source_text"], opportunity_json=None if changed else job["opportunity_json"])
+                        replacement_hash=replacement_hash,
+                        source_text=None if changed else job["source_text"], opportunity_json=None)
         else:
             raise ImportInputError("This import is already processing or has finished. Open its review instead.")
         return self.public(self.get(job_id))
@@ -379,18 +402,23 @@ class ImportQueue:
             self.db.execute("BEGIN IMMEDIATE")
             existing = self.storage.opportunity_by_listing_url(url)
             if existing:
-                self.db.rollback()
                 ours = existing["opportunity"].get("stageviva_review", {}).get("import_id") == job_id
-                self.update(job_id, status="published" if ours and existing["visible"] else "review" if ours else "duplicate",
-                            opportunity_id=existing["id"], matching_status="pending" if ours and existing["visible"] else "",
-                            message="Published. Preparing matches." if ours and existing["visible"] else "Open the saved record to review.")
-                return
-            duplicate = self.storage.duplicate_of({"id": job_id, "listing_url": url, "title": title, "source_name": "StageViva import", "opportunity": opportunity})
+                replace = (ours and job.get("replacement_hash") and not existing["visible"]
+                           and existing.get("hidden_reason") in {"needs_verification", "unverified_application", "needs_information", "source_conflict"}
+                           and _record_hash(existing["opportunity"]) == job["replacement_hash"])
+                if not replace:
+                    self.db.rollback()
+                    self.update(job_id, status="published" if ours and existing["visible"] else "review" if ours else "duplicate",
+                                opportunity_id=existing["id"], matching_status="pending" if ours and existing["visible"] else "",
+                                message="Published. Preparing matches." if ours and existing["visible"] else "The saved record was preserved. Open it to review any manual changes.")
+                    return
+            duplicate = self.storage.duplicate_of({"id": existing["id"] if existing else job_id, "listing_url": url, "title": title, "source_name": "StageViva import", "opportunity": opportunity}, exclude_id=existing["id"] if existing else None)
             if duplicate:
                 reason = "duplicate"
                 review["duplicate_of"] = duplicate["id"]
             opportunity_id = self.storage.upsert_opportunity(item, opportunity, hidden_reason=reason)
             self.update(job_id, status="duplicate" if duplicate else "review" if reason else "published", opportunity_id=opportunity_id,
+                        replacement_hash="",
                         matching_status="" if reason else "pending",
                         message=f"Saved for review: {reason.replace('_', ' ')}." if reason else "Published. Preparing matches.")
         except AIRequestsDisabledError:

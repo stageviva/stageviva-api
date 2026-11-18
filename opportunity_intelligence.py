@@ -168,6 +168,17 @@ def extract_useful_text(
         description = meta["content"].strip()
 
     # Extract visible text
+    # A button label such as 'Apply here' otherwise loses its destination,
+    # and mailto links may contain the only application email on the page.
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor["href"]).strip()
+        if href.lower().startswith("mailto:"):
+            address = href[7:].split("?", 1)[0]
+            if valid_application_email(address):
+                anchor.append(" " + address)
+        elif safe_application_url(href) or safe_official_website(href):
+            if re.search(r"\b(apply|application|audition|casting|official website)\b", anchor.get_text(" ", strip=True), re.I):
+                anchor.append(" " + href)
     seen: set[str] = set()
     lines = []
 

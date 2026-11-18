@@ -52,7 +52,7 @@ from cv_headshot import extract_cv_headshot
 from catalogue_seed import seed_catalogue_if_empty
 from database_backups import create_database_backup, list_database_backups
 from match_engine import _apply_location_and_work_rights_guard, match_input_signature, reapply_deterministic_match_guards
-from opportunity_quality import review_reason, safe_application_url
+from opportunity_quality import review_reason, safe_application_url, safe_official_website
 from opportunity_source_facts import complete_source_facts
 from public_source import public_url
 from match_service import match_artist_to_opportunity
@@ -1918,8 +1918,13 @@ def _validate_admin_opportunity(
     opportunity: dict[str, Any], storage: StageVivaStorage, *, item: dict[str, Any], exclude_id: str | None = None,
 ) -> None:
     if reason := review_reason(opportunity):
+        guidance = {
+            "unverified_application": "Add an application email or official website in Application, then confirm the source under Visibility before publishing.",
+            "needs_verification": "Check the job title and employer against the source, add any missing application details, then confirm the source under Visibility. You can also add information to the saved import and reanalyse it.",
+            "non_dancer_opportunity": "This announcement has not been identified as a dancer opportunity. Check the actual role against the source.",
+        }.get(reason, reason.replace('_', ' '))
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail=f"This opportunity requires review ({reason.replace('_', ' ')}).")
+                            detail=guidance)
     if is_non_performer_opportunity(opportunity):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="StageViva only lists performing and modelling roles, not management, teaching or backstage vacancies.")
@@ -2192,7 +2197,7 @@ def admin_update_opportunity(
     if payload.categories is not None and any(value not in OPPORTUNITY_CATEGORIES for value in payload.categories):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="One or more opportunity filters are not supported.")
-    if payload.official_url is not None and not safe_application_url(payload.official_url.strip()):
+    if payload.official_url is not None and not (safe_application_url(payload.official_url.strip()) or safe_official_website(payload.official_url.strip())):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="Use the official http(s) listing URL.")
     candidate = merge_opportunity_updates(existing["opportunity"], fields)
@@ -2269,7 +2274,7 @@ def admin_analyse_opportunity_url(
 def admin_add_opportunity(
     payload: AdminManualOpportunityRequest, admin: AdminUser, storage: Storage,
 ) -> dict[str, Any]:
-    if not safe_application_url(payload.official_url.strip()):
+    if not (safe_application_url(payload.official_url.strip()) or safe_official_website(payload.official_url.strip())):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="Use the official http(s) listing URL.")
     opportunity = payload.opportunity or {

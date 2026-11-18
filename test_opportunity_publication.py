@@ -10,11 +10,47 @@ from opportunity_discovery import DiscoveredOpportunity
 from opportunity_imports import ImportQueue, research_links
 from opportunity_publication import prepare_publication, publication_reason
 from opportunity_presentation import opportunity_detail
+from opportunity_quality import application_pathway, confirm_editorial_review, supported_excerpt
+from opportunity_intelligence import extract_useful_text
+from opportunity_imports import ImportInputError
+from storage import merge_opportunity_updates
+from opportunity_source_facts import complete_source_facts
 from storage import StageVivaStorage
 from test_opportunity_imports import ready, CAPTION
 
 
 class PublicationPolicyTest(unittest.TestCase):
+    def test_typography_differences_preserve_evidence_but_changed_facts_do_not(self):
+        self.assertTrue(supported_excerpt("Company's dancers - full-time", "Company’s dancers – full-time"))
+        self.assertFalse(supported_excerpt("No experience required", "Experience required"))
+        self.assertFalse(supported_excerpt("Deadline 19 November 2026", "Deadline 18 November 2026"))
+
+    def test_screenshot_style_standards_include_foundation_in_both_disciplines(self):
+        result = complete_source_facts({}, "They are looking for versatile dance artists with a strong foundation in both classical ballet and contemporary techniques.")
+        requirements = result["requirements"]["discipline_requirements"]
+        self.assertEqual(requirements["classical_ballet"]["required_level"], "high")
+        self.assertEqual(requirements["contemporary"]["required_level"], "high")
+
+    def test_apply_button_and_mailto_destinations_survive_text_extraction(self):
+        text = extract_useful_text('<main><a href="https://company.org/auditions/apply">Apply here</a><p>Send applications to <a href="mailto:casting@company.org?subject=Audition">the casting team</a></p></main>')
+        self.assertIn("https://company.org/auditions/apply", text)
+        self.assertIn("casting@company.org", text)
+        self.assertNotIn("subject=Audition", text)
+
+    def test_official_website_fallback_survives_visibility_and_editor_confirmation(self):
+        document = ready()
+        document["stageviva_review"]["pathway"] = {"kind": "official_website", "target": "https://company.org/", "evidence": ["Company website"]}
+        document["source"] = {"official_url": {"value": "https://company.org/"}}
+        document["application"] = {"application_url": {"value": "unknown"}, "email": {"value": "unknown"}}
+        merged = merge_opportunity_updates(document, {"visible": True})
+        self.assertEqual(application_pathway(merged)["kind"], "official_website")
+        confirm_editorial_review(merged)
+        self.assertEqual(application_pathway(merged)["kind"], "official_website")
+        changed = merge_opportunity_updates(document, {"official_url": "https://company.org/new-audition"})
+        self.assertEqual(application_pathway(changed), {})
+        approved = merge_opportunity_updates(document, {"official_url": "https://new-company.org/", "review_confirmed": True})
+        self.assertEqual(application_pathway(approved), {"kind": "official_website", "target": "https://new-company.org/"})
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.storage = StageVivaStorage(str(Path(self.temp.name) / "test.db"))
@@ -50,7 +86,7 @@ class PublicationPolicyTest(unittest.TestCase):
             self.assertEqual(self.queue.reconcile_reviews(lambda _: True), 0)
             ai.assert_not_called(); fetch.assert_not_called()
         self.assertTrue(self.storage.get_opportunity_for_admin(oid)["visible"])
-        self.assertEqual(self.queue.get(jid)["status"], "published")
+        self.assertEqual(self.queue.get(jid)["status"], "published", self.queue.get(jid)["message"])
         self.assertEqual(self.queue.get(jid)["matching_status"], "pending")
 
     def test_manual_hides_manual_edits_and_revoked_admin_access_are_preserved(self):
@@ -95,6 +131,43 @@ class PublicationPolicyTest(unittest.TestCase):
     def test_screenshot_website_without_scheme_is_researched_without_treating_email_as_url(self):
         self.assertEqual(research_links("Apply by email casting@example.org. Website: company.org/internship-\nauditions"), ["https://company.org/internship-auditions"])
         self.assertEqual(research_links("Email: casting@example.org\nCV in PDF"), [])
+
+    def test_held_import_can_be_reanalysed_and_updates_same_record_without_duplicate(self):
+        held = ready(); held["stageviva_review"]["pathway"] = {}
+        jid, oid = self.held(held)
+        self.queue.retry(jid, "owner", CAPTION + " Official website: https://company.org/auditions", True, "https://company.org/auditions")
+        with patch("opportunity_imports.analyse_opportunity", return_value=ready()) as ai:
+            self.queue.process(self.queue.claim(), lambda _: True)
+        self.assertEqual(ai.call_count, 1)
+        self.assertEqual(self.queue.get(jid)["status"], "published", self.queue.get(jid)["message"])
+        self.assertEqual(self.queue.get(jid)["opportunity_id"], oid)
+        self.assertEqual(self.storage.count("opportunities"), 1)
+        self.assertTrue(self.storage.get_opportunity_for_admin(oid)["visible"])
+
+    def test_reanalysis_can_remain_held_and_retry_again(self):
+        held = ready(); held["stageviva_review"]["pathway"] = {}
+        jid, oid = self.held(held)
+        for _ in range(2):
+            self.queue.retry(jid, "owner", "Incomplete source announcement without application details.", True)
+            with patch("opportunity_imports.analyse_opportunity", return_value=held):
+                self.queue.process(self.queue.claim(), lambda _: True)
+            self.assertEqual(self.queue.get(jid)["status"], "review")
+            self.assertFalse(self.storage.get_opportunity_for_admin(oid)["visible"])
+
+    def test_reanalysis_preserves_manual_edits_before_and_during_the_analysis(self):
+        jid, oid = self.held()
+        self.storage.update_opportunity_title(oid, "Owner corrected title")
+        with self.assertRaises(ImportInputError):
+            self.queue.retry(jid, "owner", CAPTION, True)
+        jid, oid = self.held(number=2)
+        self.queue.retry(jid, "owner", CAPTION, True)
+        def edited_during_analysis(*args, **kwargs):
+            self.storage.update_opportunity_title(oid, "Owner corrected during analysis")
+            return ready()
+        with patch("opportunity_imports.analyse_opportunity", side_effect=edited_during_analysis):
+            self.queue.process(self.queue.claim(), lambda _: True)
+        self.assertEqual(self.storage.get_opportunity_for_admin(oid)["title"], "Owner corrected during analysis")
+        self.assertFalse(self.storage.get_opportunity_for_admin(oid)["visible"])
 
 
 if __name__ == "__main__": unittest.main()

@@ -62,7 +62,10 @@ def safe_official_website(url: str) -> bool:
 
 
 def supported_excerpt(excerpt: str, source_text: str) -> bool:
-    normalize = lambda value: " ".join(unwrap_source_urls(unicodedata.normalize("NFKC", value).replace("\u00ad", "")).casefold().split())
+    # Typography and OCR line wrapping can differ without changing the words.
+    # Retain punctuation (including negation/numbers); never fuzzy-match claims.
+    punctuation = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-", "−": "-"})
+    normalize = lambda value: " ".join(unwrap_source_urls(unicodedata.normalize("NFKC", value).replace("\u00ad", "").translate(punctuation)).casefold().split())
     quote = normalize(excerpt)
     return len(quote) >= 4 and quote in normalize(source_text)
 
@@ -145,11 +148,17 @@ def confirm_editorial_review(opportunity: dict) -> None:
     """Record the administrator's explicit confirmation of role and application."""
     email = str(value_at(opportunity, "application", "email") or "").strip()
     url = str(value_at(opportunity, "application", "application_url") or "").strip()
-    pathway = {}
+    if url in {"", "unknown"}:
+        url = str(value_at(opportunity, "source", "official_url") or "").strip()
+    # Keep a valid website fallback instead of erasing it on confirmation.
+    previous = application_pathway(opportunity)
+    pathway = previous if previous.get("kind") == "official_website" and previous.get("target") == url else {}
     if valid_application_email(email):
         pathway = {"kind": "email", "target": email}
-    elif safe_application_url(url):
+    elif safe_application_url(url) and not pathway:
         pathway = {"kind": "relevant_listing", "target": url}
+    elif not pathway and safe_official_website(url):
+        pathway = {"kind": "official_website", "target": url}
     review = opportunity.setdefault("stageviva_review", {})
     review.setdefault("original_decision", review.get("decision"))
     review.setdefault("original_pathway", review.get("pathway"))

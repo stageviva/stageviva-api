@@ -325,6 +325,29 @@ class ImportQueueTest(unittest.TestCase):
 
 
 class ImportApiTest(unittest.TestCase):
+    def test_admin_can_approve_official_homepage_and_save_website_fallback(self):
+        headers = self.headers("owner@example.com")
+        document = ready()
+        document["application"] = {"application_url": {"value": "unknown"}, "email": {"value": "unknown"}}
+        document["source"] = {"official_url": {"value": "https://company.org/"}}
+        document["stageviva_review"].update(decision="NEEDS_VERIFICATION", pathway={})
+        storage = StageVivaStorage(api.DATABASE_PATH)
+        try:
+            oid = storage.upsert_opportunity(DiscoveredOpportunity("Company dancers", "https://example.org/held", "StageViva import", "https://example.org/held", "manual"), document, hidden_reason="needs_verification")
+        finally:
+            storage.close()
+        with patch.object(api, "_match_opportunity_against_registered_artists", return_value={}), patch.object(api, "_deliver_queued_push_notifications", return_value={}):
+            response = self.client.patch(f"/admin/opportunities/{oid}", headers=headers,
+                json={"official_url": "https://company.org/", "review_confirmed": True, "visible": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        storage = StageVivaStorage(api.DATABASE_PATH)
+        try:
+            current = storage.get_opportunity_for_admin(oid)
+            self.assertTrue(current["visible"])
+            self.assertEqual(current["opportunity"]["stageviva_review"]["pathway"]["kind"], "official_website")
+        finally:
+            storage.close()
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.patchers = [patch.object(api, "DATABASE_PATH", str(Path(self.directory.name) / "api.db")),
