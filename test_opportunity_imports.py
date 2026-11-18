@@ -309,6 +309,16 @@ class ImportQueueTest(unittest.TestCase):
         self.assertEqual(self.ai.call_args.kwargs["research_urls"], ["https://company.org/apply/role"])
         self.fetch.assert_called_once()
 
+    def test_explicit_retry_rereads_old_ocr_cache_with_the_new_reader(self):
+        job = self.enqueue(images=[screenshot()], complete=True)
+        self.queue.update(job["id"], source_text="Old cached text omitted the bottom dates.", source_reader_version="")
+        self.queue.update(job["id"], status="paused")
+        self.queue.retry(job["id"], "owner", CAPTION, True)
+        with patch("opportunity_imports._extract_image_text", return_value=CAPTION + " Full-Time Contracts: 1 July 2027 – 30 June 2028") as ocr:
+            result = self.process()
+        ocr.assert_called_once()
+        self.assertIn("1 July 2027", result["source_text"])
+
     def test_matching_only_spends_one_new_call_per_iteration_and_resumes_from_cache(self):
         storage = Mock()
         storage.list_registered_artists.return_value = [(f"artist-{index}", {"index": index}) for index in range(3)]

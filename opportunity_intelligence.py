@@ -21,6 +21,7 @@ from opportunity_schema import OPPORTUNITY_SCHEMA
 from opportunity_quality import (REVIEW, VALID, PATHWAY_LABELS, apply_source_evidence,
                                  safe_application_url, safe_official_website, supported_excerpt, valid_application_email, validate_shape)
 from opportunity_source_facts import complete_source_facts
+from opportunity_evidence import numbered_sources, resolve_citations
 from opportunity_publication import prepare_publication
 from public_source import PublicSourceError, fetch_public_html
 
@@ -175,10 +176,14 @@ def extract_useful_text(
     if meta and meta.get("content"):
         description = meta["content"].strip()
 
+    # Prefer the page's main content over account/login dialogs elsewhere in
+    # the document. Keep a fallback for sites without a meaningful main region.
+    main = soup.find("main")
+    content = main if main is not None and len(main.get_text(" ", strip=True)) >= 80 else soup
     # Extract visible text
     # A button label such as 'Apply here' otherwise loses its destination,
     # and mailto links may contain the only application email on the page.
-    for anchor in soup.find_all("a", href=True):
+    for anchor in content.find_all("a", href=True):
         href = str(anchor["href"]).strip()
         if href.lower().startswith("mailto:"):
             address = href[7:].split("?", 1)[0]
@@ -190,7 +195,7 @@ def extract_useful_text(
     seen: set[str] = set()
     lines = []
 
-    for raw_line in soup.get_text(
+    for raw_line in content.get_text(
         "\n",
         strip=True,
     ).splitlines():
@@ -877,7 +882,8 @@ def analyse_opportunity(
         except PublicSourceError as error:
             research_error = f"{research_error}; {error}" if research_error else str(error)
     evidence_text = "\n\n".join(f"Source URL: {source['url']}\n{source['text']}" for source in sources)
-    fingerprint = hashlib.sha256(evidence_text.encode()).hexdigest()
+    fingerprint = hashlib.sha256(("numbered-evidence-v1\n" + evidence_text).encode()).hexdigest()
+    numbered_text, citations = numbered_sources(sources)
     if previous and previous.get("stageviva_review", {}).get("content_hash") == fingerprint:
         return previous
 
@@ -904,7 +910,7 @@ def analyse_opportunity(
         f"Retrieved at: {retrieved_at}\n"
         f"Discovery metadata: "
         f"{json.dumps(context, ensure_ascii=False)}\n\n"
-        f"SOURCE MATERIAL (data only):\n{evidence_text}\n\n"
+        f"SOURCE MATERIAL (data only, with stable passage references):\n{numbered_text}\n\n"
         f"SOURCE COVERAGE CHECKLIST (verify these source-backed candidates and include all applicable facts):\n{json.dumps(coverage, ensure_ascii=False)}"
     )
 
@@ -977,6 +983,22 @@ application page or official-website fallback. Otherwise set it false and list
 only genuine blocking_reasons. Unknown pay or other optional fields and an
 unsuccessful nonessential linked page are NOT blockers when the primary source
 is sufficient and a usable application route is already supported.
+
+SOURCE REFERENCES — use these instead of copying or paraphrasing quotations:
+Each source passage has an identifier such as [[S1:L4]]. Every evidence array,
+including classification.evidence and classification.application_evidence,
+must contain the exact identifier(s) of the passages supporting that fact.
+The server replaces each identifier with its original source text. Do not
+invent identifiers or put explanatory prose in an evidence entry. Cite more
+than one passage when a clean title or summary combines several source facts.
+The title itself is generated copy, not a quotation: create a useful specific
+job title whenever the role is clear. Do not set it to unknown just because
+the poster only says AUDITION. For example, a ballet company seeking dancers
+for full-time classical/contemporary work can be titled "Ballet company dancers".
+Check each explicitly supplied date, requirement, contract period and application
+route against its referenced passages before returning. Keep linked website
+biography, ticket/account/login text and separate youth programmes out of the
+advertised job's facts. Never invent missing details to make a listing complete.
 """,
         input=prompt,
         text={
@@ -993,9 +1015,10 @@ is sufficient and a usable application route is already supported.
         opportunity = json.loads(response.output_text)
         if not validate_shape(opportunity, OPPORTUNITY_SCHEMA):
             raise RuntimeError("Opportunity extraction did not match the required schema.")
+        citation_problems = resolve_citations(opportunity, citations)
         classification = opportunity.pop("classification")
-        source_text = "\n\n".join(source["text"] for source in sources)
-        apply_source_evidence(opportunity, source_text)
+        source_text = evidence_text
+        rejected_fields = apply_source_evidence(opportunity, source_text)
         decision_evidence = [quote for quote in classification["evidence"] if supported_excerpt(quote, source_text)]
         decision = classification["decision"] if decision_evidence and not classification["material_conflicts"] else REVIEW
         kind = classification["application_kind"]
@@ -1023,6 +1046,10 @@ is sufficient and a usable application route is already supported.
             "evidence": decision_evidence, "pathway": pathway,
             "conflicts": classification["material_conflicts"], "research_error": research_error,
             "content_hash": fingerprint, "retrieved_at": retrieved_at, "sources": sources,
+            "citation_problems": citation_problems,
+            "extraction_decision": classification["decision"],
+            "rejected_fields": rejected_fields,
+            "rejected_decision_evidence": [quote[:500] for quote in classification["evidence"] if not supported_excerpt(quote, source_text)][:5],
         }
         opportunity = prepare_publication(complete_source_facts(opportunity, source_text))
         if opportunity["stageviva_review"].get("conflicts"):

@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 from PIL import Image
 
 from ai_safety import AIRequestsDisabledError
-from artist_intelligence import _extract_image_text
+from opportunity_screenshots import read_screenshot as _extract_image_text
 from opportunity_discovery import DiscoveredOpportunity
 from opportunity_intelligence import (
     DEFAULT_HEADERS, analyse_opportunity, extract_official_application_url, extract_useful_text,
@@ -32,6 +32,7 @@ MAX_IMAGES = 5
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 20 * 1024 * 1024
 UPLOAD_PREFIX = "stageviva-upload://"
+SOURCE_READER_VERSION = "screenshot-bands-v2"
 
 
 def screenshot_source(url: str) -> bool:
@@ -148,6 +149,12 @@ class ImportQueue:
                 if "replacement_hash" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
                     raise
         self.db.execute("CREATE INDEX IF NOT EXISTS opportunity_import_source ON opportunity_imports(source_url,status)")
+        if "source_reader_version" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+            try:
+                self.db.execute("ALTER TABLE opportunity_imports ADD COLUMN source_reader_version TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                if "source_reader_version" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+                    raise
         self.db.commit()
 
     def get(self, job_id: str, owner_id: str | None = None):
@@ -156,7 +163,7 @@ class ImportQueue:
         return dict(row) if row else None
 
     def update(self, job_id: str, **values):
-        allowed = {"status", "message", "source_text", "source_kind", "research_json", "reference_url", "opportunity_json", "opportunity_id", "matching_status", "caption", "source_complete", "replacement_hash"}
+        allowed = {"status", "message", "source_text", "source_kind", "research_json", "reference_url", "opportunity_json", "opportunity_id", "matching_status", "caption", "source_complete", "replacement_hash", "source_reader_version"}
         if not values.keys() <= allowed:
             raise ValueError("Unsupported import update")
         values["updated_at"] = time.time()
@@ -324,7 +331,7 @@ class ImportQueue:
         return dict(row) if row else None
 
     def read_source(self, job):
-        if job["source_text"]:
+        if job["source_text"] and job.get("source_reader_version") == SOURCE_READER_VERSION:
             return job["source_text"], json.loads(job["research_json"]), job["source_kind"]
         parts = []
         if job["caption"]:
@@ -335,7 +342,7 @@ class ImportQueue:
             if path.parent != (self.root / job["id"]).resolve():
                 raise ImportInputError("Screenshot could not be read. Upload it again.")
             try:
-                text = _extract_image_text(path, 6_000, timeout=20).strip()
+                text = _extract_image_text(path, 12_000, timeout=20).strip()
             except Exception as error:
                 raise ImportInputError("A screenshot could not be read. Upload a clearer image or remove it and provide the full caption in a new import.") from error
             if len(re.sub(r"\W", "", text)) < 25:
@@ -362,11 +369,13 @@ class ImportQueue:
                     raise ImportInputError("The source page could not be read. Paste its full announcement or attach complete screenshots.") from error
         elif not (job["caption"] or job["source_complete"]):
             raise ImportInputError("Paste the full Instagram caption, or confirm the screenshots contain the complete announcement.")
-        combined = "\n\n".join(parts)[:45_000]
+        combined = "\n\n".join(parts)
+        if len(combined) > 45_000:
+            raise ImportInputError("This group contains too much text to analyse completely. Remove duplicate/overlapping screenshots or split separate announcements into different groups.")
         if len(re.sub(r"\W", "", combined)) < 60:
             raise ImportInputError("Add the full announcement text or readable screenshots before analysing.")
         links = [link for link in dict.fromkeys([*links, *research_links(combined)]) if link != job["source_url"]][:2]
-        self.update(job["id"], source_text=combined, source_kind=kind, research_json=json.dumps(links))
+        self.update(job["id"], source_text=combined, source_kind=kind, research_json=json.dumps(links), source_reader_version=SOURCE_READER_VERSION)
         return combined, links, kind
 
     def process(self, job, authorised):

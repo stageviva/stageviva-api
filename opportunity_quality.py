@@ -86,28 +86,34 @@ def validate_shape(value, schema: dict) -> bool:
     return isinstance(value, str) and ("enum" not in schema or value in schema["enum"])
 
 
-def apply_source_evidence(opportunity: dict, text: str) -> None:
+def apply_source_evidence(opportunity: dict, text: str, _path: str = "") -> list[dict]:
     """Clear extracted facts that have no source excerpt. Preserve their field shape."""
-    for field in opportunity.values():
+    rejected = []
+    for key, field in opportunity.items():
+        path = f"{_path}.{key}".lstrip(".")
         if isinstance(field, list):
             for item in field:
                 if isinstance(item, dict) and "value" in item and "evidence" in item:
-                    apply_source_evidence({"item": item}, text)
+                    rejected.extend(apply_source_evidence({"item": item}, text, path))
             continue
         if not isinstance(field, dict):
             continue
         if "evidence" not in field:
-            apply_source_evidence(field, text)
+            rejected.extend(apply_source_evidence(field, text, path))
             continue
-        field["evidence"] = [quote for quote in field["evidence"] if supported_excerpt(quote, text)]
+        original_evidence = list(field["evidence"])
+        field["evidence"] = [quote for quote in original_evidence if supported_excerpt(quote, text)]
         if field["evidence"]:
             continue
+        if original_evidence:
+            rejected.append({"field": path, "reason": "unmatched_evidence", "proposed_value": str(field.get("value", field.get("required_level", "")))[:500], "evidence": [str(quote)[:500] for quote in original_evidence[:3]]})
         field["confidence"] = "unknown"
         if "required_level" in field:
             field.update(required_level="unknown", assessment_basis="not_specified")
         elif "value" in field:
             original = field["value"]
             field["value"] = [] if isinstance(original, list) else None if isinstance(original, bool) else "unknown"
+    return rejected[:30]
 
 
 def application_pathway(opportunity: dict) -> dict:

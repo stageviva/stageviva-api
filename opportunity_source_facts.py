@@ -15,6 +15,7 @@ from opportunity_quality import value_at
 MONTH = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 DATE = rf"(?:\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTH}\s*,?\s*20\d{{2}}|{MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?\s*,?\s*20\d{{2}})"
 DEADLINE = re.compile(rf"\b(?:application\s+deadline|deadline|apply\s+(?:by|before)|applications?\s+(?:close|closing))\b[^\w\d]{{0,30}}(?P<date>{DATE})", re.I)
+CONTRACT_RANGE = re.compile(rf"\b(?:contracts?(?:\s+(?:dates|period|duration))?|employment(?:\s+period)?|full[- ]time\s+contracts?)\s*:?\s*[^\w\d]{{0,20}}(?P<start>{DATE})\s*(?:–|—|-|to|until|through)\s*(?P<end>{DATE})", re.I)
 LEVELS = {"excellent": "high", "advanced": "high", "strong": "high", "exceptional": "very_high", "outstanding": "very_high", "intermediate": "medium", "basic": "low"}
 DISCIPLINES = {"classical": "classical_ballet", "classical ballet": "classical_ballet", "ballet": "classical_ballet", "contemporary": "contemporary", "jazz": "jazz", "improvisation": "improvisation", "tap": "tap", "partnering": "partnering", "acrobatics": "acrobatics"}
 NAMES = r"(?:classical(?:\s+ballet)?|ballet|contemporary|jazz|improvisation|tap|partnering|acrobatics)\b"
@@ -50,6 +51,21 @@ def complete_source_facts(opportunity: dict, text: str | None = None) -> dict:
     if len(dates) > 1:
         conflicts.append("Retained sources state different application deadlines.")
     flat = " ".join(text.split())
+    ranges = {}
+    for match in CONTRACT_RANGE.finditer(flat):
+        try:
+            start, end = (parser.parse(match[key], default=datetime(2001, 1, 1)).date().isoformat() for key in ("start", "end"))
+        except (ValueError, OverflowError):
+            continue
+        if start <= end:
+            ranges[(start, end)] = match.group()
+    if len(ranges) == 1:
+        (start, end), quote = next(iter(ranges.items()))
+        for key, value in (("contract_start", start), ("contract_end", end)):
+            if not known(value_at(result, "dates", key)):
+                result.setdefault("dates", {})[key] = {"value": value, "confidence": "high", "evidence": [quote]}
+    elif len(ranges) > 1:
+        conflicts.append("Retained sources state different contract periods.")
     for phrase in re.finditer(r"\b(?:(?:strong|distinctive|individual)\s+(?:creative|artistic)\s+(?:signature|voice)|(?:refined|strong|mature)\s+artistry|improvisational\s+(?:playfulness|skills?|ability))\b", flat, re.I):
         prefix = flat[max(0, phrase.start() - 160):phrase.start()]
         if not re.search(r"\b(requirements?|require[ds]?|seeking|must|with)\b", prefix, re.I):

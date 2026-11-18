@@ -4,12 +4,25 @@ import copy
 import re
 from urllib.parse import urlsplit
 
-from opportunity_quality import VALID, application_pathway, review_reason, safe_official_website, unwrap_source_urls, valid_application_email
+from opportunity_quality import VALID, application_pathway, review_reason, safe_official_website, unwrap_source_urls, valid_application_email, value_at
 from opportunity_source_facts import complete_source_facts
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_policy import is_non_performer_opportunity, is_school_or_training_opportunity
 
 PUBLICATION_POLICY = "source-ready-v3"
+
+
+def _resolved_application(result: dict) -> dict:
+    review = result.get("stageviva_review", {})
+    blockers = review.get("blocking_reasons") or []
+    if (review.get("decision") == VALID and application_pathway(result)
+            and "application_missing" in blockers):
+        review["blocking_reasons"] = [reason for reason in blockers if reason != "application_missing"]
+        review["resolved_blockers"] = list(dict.fromkeys([*(review.get("resolved_blockers") or []), "application_missing"]))
+        if (not review["blocking_reasons"] and not review.get("conflicts")
+                and all(str(value_at(result, "identity", key) or "").strip().casefold() not in {"", "unknown", "not specified", "n/a"} for key in ("title", "organisation"))):
+            review["ready_for_publication"] = True
+    return result
 
 
 def _application_emails(text):
@@ -27,7 +40,7 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
     result = copy.deepcopy(complete_source_facts(opportunity))
     review = result.get("stageviva_review", {})
     if review.get("decision") != VALID or application_pathway(result):
-        return result
+        return _resolved_application(result)
     review = result["stageviva_review"]
     sources = review.get("sources") or []
     text = "\n".join(str(source.get("text", "")) for source in sources if isinstance(source, dict))
@@ -41,7 +54,7 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
             quote = prefix.strip() + " " + match.group()
             review["pathway"] = {"kind": "email", "target": match.group(), "evidence": [quote]}
             result.setdefault("application", {})["email"] = {"value": match.group(), "evidence": [quote], "confidence": "high"}
-            return result
+            return _resolved_application(result)
     # Employer-website fallback must be explicitly supplied and actually
     # retrieved. A directory or arbitrary first link is not promoted.
     normalized = unwrap_source_urls(text)
@@ -67,7 +80,7 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
         review["pathway"] = {"kind": "official_website", "target": url, "evidence": [quote]}
         result.setdefault("source", {})["official_url"] = {"value": url, "evidence": [quote], "confidence": "high"}
         break
-    return result
+    return _resolved_application(result)
 
 
 def publication_reason(opportunity: dict) -> str | None:
