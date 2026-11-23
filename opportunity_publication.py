@@ -4,12 +4,37 @@ import copy
 import re
 from urllib.parse import urlsplit
 
-from opportunity_quality import VALID, application_pathway, review_reason, safe_official_website, unwrap_source_urls, valid_application_email, value_at
+from opportunity_quality import VALID, REVIEW, application_pathway, review_reason, safe_official_website, supported_excerpt, unwrap_source_urls, valid_application_email, value_at
 from opportunity_source_facts import complete_source_facts
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_policy import is_non_performer_opportunity, is_school_or_training_opportunity
 
-PUBLICATION_POLICY = "source-ready-v4"
+PUBLICATION_POLICY = "source-ready-v5"
+
+
+def _recover_role_evidence(result: dict) -> None:
+    """Reuse verified recruitment facts when the model omitted its role quote."""
+    review = result.get("stageviva_review", {})
+    if (review.get("decision") != REVIEW or review.get("extraction_decision") != VALID
+            or review.get("evidence") or review.get("rejected_decision_evidence")
+            or review.get("conflicts") or review.get("blocking_reasons")):
+        return
+    sources = review.get("sources") or []
+    text = "\n".join(str(source.get("text", "")) for source in sources if isinstance(source, dict))
+    identity = result.get("identity", {})
+    for key in ("title", "organisation"):
+        field = identity.get(key, {})
+        if (not isinstance(field, dict) or str(field.get("value", "")).strip().casefold() in {"", "unknown", "not specified", "n/a"}
+                or not any(supported_excerpt(str(quote), text) for quote in field.get("evidence", []))):
+            return
+    for key in ("title", "description", "opportunity_type"):
+        field = identity.get(key, {})
+        for quote in field.get("evidence", []) if isinstance(field, dict) else []:
+            if not isinstance(quote, str) or not supported_excerpt(quote, text):
+                continue
+            if re.search(r"\b(?:seeking|looking\s+for|recruiting|hiring)\b.{0,100}\b(?:dancers?|dance\s+artists?)\b", " ".join(quote.split()), re.I):
+                review.update(decision=VALID, evidence=[quote], role_evidence_recovered_from_fields=True)
+                return
 
 
 def _resolved_application(result: dict, *, recovered: bool = False) -> dict:
@@ -41,6 +66,7 @@ def _application_emails(text):
 
 def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
     result = copy.deepcopy(complete_source_facts(opportunity))
+    _recover_role_evidence(result)
     review = result.get("stageviva_review", {})
     if review.get("decision") != VALID or application_pathway(result):
         return _resolved_application(result)

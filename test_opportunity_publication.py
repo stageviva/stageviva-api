@@ -152,6 +152,33 @@ class PublicationPolicyTest(unittest.TestCase):
             ai.assert_not_called(); fetch.assert_not_called()
         self.assertTrue(self.storage.get_opportunity_for_admin(oid)["visible"])
 
+    def test_missing_classification_quote_reuses_supported_recruitment_facts(self):
+        quote = "They are looking for versatile dance artists with a strong foundation in both classical ballet and contemporary techniques."
+        document = ready()
+        for field in document["identity"].values():
+            field["evidence"] = [quote]
+        document["stageviva_review"].update(decision="NEEDS_VERIFICATION", extraction_decision="VALID_DANCER_OPPORTUNITY", evidence=[], rejected_decision_evidence=[], blocking_reasons=[], ready_for_publication=True, pathway={}, sources=[
+            {"url": "stageviva-upload://one", "type": "caption", "text": quote},
+            {"url": "https://company.org/ballet", "type": "linked_page", "text": "Official company auditions"}])
+        repaired = prepare_publication(document, "https://company.org/ballet")
+        self.assertIsNone(publication_reason(repaired))
+        self.assertTrue(repaired["stageviva_review"]["role_evidence_recovered_from_fields"])
+        self.assertEqual(document["stageviva_review"]["decision"], "NEEDS_VERIFICATION")
+        for changes in ({"conflicts": ["Different deadlines"]}, {"blocking_reasons": ["critical_requirements_unclear"]}, {"rejected_decision_evidence": ["invented quote"]}, {"extraction_decision": "NEEDS_VERIFICATION"}):
+            held = copy.deepcopy(document)
+            held["stageviva_review"].update(changes)
+            self.assertIsNotNone(publication_reason(prepare_publication(held, "https://company.org/ballet")))
+        for unsupported in ("We offer classes for dancers", "They are hiring teachers", "They are looking for dancers: invented text"):
+            held = copy.deepcopy(document)
+            for field in held["identity"].values(): field["evidence"] = [unsupported]
+            self.assertIsNotNone(publication_reason(prepare_publication(held, "https://company.org/ballet")))
+        jid, oid = self.held(document)
+        self.queue.update(jid, reference_url="https://company.org/ballet")
+        with patch("opportunity_imports.analyse_opportunity") as ai, patch("opportunity_imports.fetch_public_html") as fetch:
+            self.assertEqual(self.queue.reconcile_reviews(lambda _: True), 1)
+            ai.assert_not_called(); fetch.assert_not_called()
+        self.assertTrue(self.storage.get_opportunity_for_admin(oid)["visible"])
+
     def test_legacy_source_is_clickable_without_claiming_a_verified_apply_route(self):
         item = {"opportunity_id": "legacy", "listing_url": "https://balletplaces.com/auditions/example", "opportunity": {"identity": {"title": {"value": "Dancers"}}}, "match": {}}
         detail = opportunity_detail(item)
