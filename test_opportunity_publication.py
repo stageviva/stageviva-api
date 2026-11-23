@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from opportunity_discovery import DiscoveredOpportunity
-from opportunity_imports import ImportQueue, research_links
+from opportunity_imports import ImportQueue, import_failure, research_links
 from opportunity_publication import prepare_publication, publication_reason
 from opportunity_presentation import opportunity_detail
 from opportunity_quality import application_pathway, confirm_editorial_review, supported_excerpt
@@ -20,6 +20,44 @@ from test_opportunity_imports import ready, CAPTION
 
 
 class PublicationPolicyTest(unittest.TestCase):
+    def test_failed_import_diagnostics_do_not_expose_provider_bodies_or_credentials(self):
+        error = RuntimeError("secret https://signed.example/private?token=hidden")
+        error.status_code = 400
+        error.body = {"code": "invalid_json_schema", "message": str(error)}
+        code, message = import_failure(error)
+        self.assertEqual(code, "analysis_format_error")
+        self.assertNotIn("hidden", message)
+        self.assertNotIn("secret", message)
+        self.assertEqual(import_failure(TimeoutError("private"))[0], "analysis_timeout")
+    def test_saved_edits_match_in_durable_bounded_background_steps(self):
+        _, oid = self.held()
+        self.storage.set_opportunity_visibility(oid, True)
+        self.queue.queue_saved_match(oid, "owner")
+        reopened = ImportQueue(self.storage, Path(self.temp.name) / "images")
+        matcher = unittest.mock.Mock(side_effect=[{"remaining": True}, {"remaining": False}])
+        self.assertTrue(reopened.match_saved_one(lambda _: True, matcher))
+        self.assertTrue(reopened.match_saved_one(lambda _: True, matcher))
+        self.assertFalse(reopened.match_saved_one(lambda _: True, matcher))
+        self.assertEqual(matcher.call_count, 2)
+
+    def test_newer_save_and_hidden_or_revoked_records_are_preserved_by_matching(self):
+        _, oid = self.held()
+        self.storage.set_opportunity_visibility(oid, True)
+        self.queue.queue_saved_match(oid, "owner")
+        def edit_during_matching(*args):
+            self.queue.queue_saved_match(oid, "owner")
+            return {}
+        self.queue.match_saved_one(lambda _: True, edit_during_matching)
+        self.assertEqual(self.storage.connection.execute("SELECT status FROM catalogue_match_jobs WHERE opportunity_id=?", (oid,)).fetchone()[0], "pending")
+        matcher = unittest.mock.Mock()
+        self.storage.hide_opportunity(oid)
+        self.queue.match_saved_one(lambda _: True, matcher)
+        matcher.assert_not_called()
+        self.storage.set_opportunity_visibility(oid, True)
+        self.queue.queue_saved_match(oid, "owner")
+        self.queue.match_saved_one(lambda _: False, matcher)
+        matcher.assert_not_called()
+
     def test_new_import_requires_title_type_and_description_and_a_real_apply_route(self):
         for key in ("title", "opportunity_type", "description"):
             document = ready()

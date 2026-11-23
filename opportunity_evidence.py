@@ -1,28 +1,6 @@
 """Stable source citations for generated opportunity copy, without fuzzy quotes."""
 
-import copy
 import re
-
-
-def citation_schema(schema: dict, citations: dict[str, str]) -> dict:
-    """Constrain evidence to existing source IDs, without repeating their enum."""
-    result = copy.deepcopy(schema)
-    result["$defs"] = {"source_reference": {"type": "string", "enum": list(citations)}}
-
-    def visit(node):
-        if not isinstance(node, dict):
-            return
-        for key, child in node.get("properties", {}).items():
-            if key in {"evidence", "application_evidence"} and child.get("type") == "array":
-                child["items"] = {"$ref": "#/$defs/source_reference"}
-            else:
-                visit(child)
-        if node.get("type") == "array":
-            visit(node.get("items"))
-
-    visit(result)
-    result["properties"]["classification"]["properties"]["evidence"]["minItems"] = 1
-    return result
 
 
 def numbered_sources(sources: list[dict]) -> tuple[str, dict[str, str]]:

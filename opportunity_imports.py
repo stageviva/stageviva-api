@@ -36,6 +36,28 @@ UPLOAD_PREFIX = "stageviva-upload://"
 SOURCE_READER_VERSION = "screenshot-bands-v2"
 
 
+def import_failure(error: Exception) -> tuple[str, str]:
+    """Safe machine diagnostics; never persist provider bodies or signed URLs."""
+    status = getattr(error, "status_code", None)
+    body = getattr(error, "body", None)
+    code = body.get("code") if isinstance(body, dict) else None
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        code = body["error"].get("code", code)
+    if code == "invalid_json_schema":
+        return "analysis_format_error", "The analysis service rejected the request format. Your input is saved; wait for an importer update before retrying."
+    if status in {401, 403}:
+        return "analysis_access_error", "The analysis service could not be accessed. Your input is saved; the server configuration needs checking."
+    if status == 429:
+        return "analysis_rate_limited", "The analysis service is temporarily unavailable or its usage limit was reached. Your input is saved."
+    if "timeout" in type(error).__name__.lower():
+        return "analysis_timeout", "The analysis service did not finish in time. Your input is saved."
+    if status == 400:
+        return "analysis_request_rejected", "The analysis service rejected this request. Your input is saved; the importer needs checking."
+    if type(error) is RuntimeError and str(error) in {"Opportunity extraction did not match the required schema.", "Opportunity extraction returned invalid JSON."}:
+        return "analysis_response_format", "The analysis response could not be read. Your input is saved."
+    return "processing_error", "The import could not finish. Your input is saved. The failure reference below can help identify the cause."
+
+
 def screenshot_source(url: str) -> bool:
     return url.startswith(UPLOAD_PREFIX)
 
@@ -158,6 +180,20 @@ class ImportQueue:
                     raise
         self.db.commit()
 
+        for column in ("failure_code", "failure_stage", "failure_type"):
+            if column not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+                try:
+                    self.db.execute(f"ALTER TABLE opportunity_imports ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError:
+                    if column not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+                        raise
+        self.db.commit()
+
+        self.db.execute("""CREATE TABLE IF NOT EXISTS catalogue_match_jobs (
+            opportunity_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+            generation TEXT NOT NULL, status TEXT NOT NULL, updated_at REAL NOT NULL)""")
+        self.db.commit()
+
         if "notification_read_at" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
             try:
                 self.db.execute("ALTER TABLE opportunity_imports ADD COLUMN notification_read_at TEXT")
@@ -165,6 +201,41 @@ class ImportQueue:
                 if "notification_read_at" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
                     raise
         self.db.commit()
+
+    def queue_saved_match(self, opportunity_id: str, owner_id: str):
+        """Persist rematching separately from a completed admin save."""
+        self.db.execute("""INSERT INTO catalogue_match_jobs VALUES (?,?,?,'pending',?)
+            ON CONFLICT(opportunity_id) DO UPDATE SET owner_id=excluded.owner_id,
+            generation=excluded.generation,status='pending',updated_at=excluded.updated_at""",
+            (opportunity_id, owner_id, uuid.uuid4().hex, time.time()))
+        self.db.commit()
+
+    def match_saved_one(self, authorised, matcher):
+        self.db.execute("BEGIN IMMEDIATE")
+        row = self.db.execute("""SELECT * FROM catalogue_match_jobs
+            WHERE status='pending' OR (status='running' AND updated_at<?)
+            ORDER BY updated_at LIMIT 1""", (time.time() - 300,)).fetchone()
+        if row:
+            self.db.execute("UPDATE catalogue_match_jobs SET status='running',updated_at=? WHERE opportunity_id=?",
+                (time.time(), row["opportunity_id"]))
+        self.db.commit()
+        if not row:
+            return False
+        state = "complete"
+        try:
+            current = self.storage.get_opportunity_for_admin(row["opportunity_id"])
+            if current and current["visible"] and authorised(row["owner_id"]):
+                result = matcher(current["id"], current["opportunity"], self.storage)
+                if result.get("remaining"):
+                    state = "pending"
+        except Exception:
+            state = "paused"
+        # An edit queued during matching must keep its newer work pending.
+        self.db.execute("""UPDATE catalogue_match_jobs SET status=?,updated_at=?
+            WHERE opportunity_id=? AND generation=?""",
+            (state, time.time(), row["opportunity_id"], row["generation"]))
+        self.db.commit()
+        return True
 
     def notifications(self, owner_id: str):
         rows = self.db.execute("""SELECT * FROM opportunity_imports WHERE owner_id=?
@@ -194,7 +265,7 @@ class ImportQueue:
         return dict(row) if row else None
 
     def update(self, job_id: str, **values):
-        allowed = {"status", "message", "source_text", "source_kind", "research_json", "reference_url", "opportunity_json", "opportunity_id", "matching_status", "caption", "source_complete", "replacement_hash", "source_reader_version"}
+        allowed = {"status", "message", "source_text", "source_kind", "research_json", "reference_url", "opportunity_json", "opportunity_id", "matching_status", "caption", "source_complete", "replacement_hash", "source_reader_version", "failure_code", "failure_stage", "failure_type"}
         if not values.keys() <= allowed:
             raise ValueError("Unsupported import update")
         values["updated_at"] = time.time()
@@ -237,6 +308,7 @@ class ImportQueue:
             "title": value_at(opportunity, "identity", "title") or "",
             "caption": job["caption"], "source_complete": bool(job["source_complete"]),
             "screenshot_count": len(json.loads(job["images_json"])),
+            "failure_code": job.get("failure_code", ""), "failure_stage": job.get("failure_stage", ""), "failure_type": job.get("failure_type", ""),
         }
 
     def list(self, owner_id: str):
@@ -336,7 +408,8 @@ class ImportQueue:
             self.update(job_id, status="queued", message="", caption=caption.strip(), source_complete=int(complete),
                         reference_url=reference_url,
                         replacement_hash=replacement_hash,
-                        source_text=None if changed else job["source_text"], opportunity_json=None)
+                        source_text=None if changed else job["source_text"], opportunity_json=None,
+                        failure_code="", failure_stage="", failure_type="")
             self.db.execute("UPDATE opportunity_imports SET notification_read_at=NULL WHERE id=?", (job_id,))
             self.db.commit()
         else:
@@ -475,10 +548,12 @@ class ImportQueue:
         except ImportInputError as error:
             self.db.rollback()
             self.update(job_id, status="needs_information", message=str(error))
-        except Exception:
+        except Exception as error:
             self.db.rollback()
             # Provider errors can include signed URLs or private response data.
-            self.update(job_id, status="failed", message="The import could not finish. Your input is saved. Retry when ready; a fresh analysis may be needed.")
+            code, message = import_failure(error)
+            stage = self.get(job_id)["status"]
+            self.update(job_id, status="failed", message=message, failure_code=code, failure_stage=stage, failure_type=type(error).__name__[:80])
 
     def reconcile_reviews(self, authorised):
         """Recheck saved AI results once per policy version, without AI or HTTP.

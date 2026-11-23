@@ -21,7 +21,7 @@ from opportunity_schema import OPPORTUNITY_SCHEMA
 from opportunity_quality import (REVIEW, VALID, PATHWAY_LABELS, apply_source_evidence,
                                  safe_application_url, safe_official_website, supported_excerpt, valid_application_email, validate_shape)
 from opportunity_source_facts import complete_source_facts
-from opportunity_evidence import citation_schema, numbered_sources, resolve_citations
+from opportunity_evidence import numbered_sources, resolve_citations
 from opportunity_publication import prepare_publication
 from public_source import PublicSourceError, fetch_public_html
 
@@ -1013,7 +1013,7 @@ advertised job's facts. Never invent missing details to make a listing complete.
                 "type": "json_schema",
                 "name": "stageviva_opportunity",
                 "strict": True,
-                "schema": citation_schema(OPPORTUNITY_SCHEMA, citations),
+                "schema": OPPORTUNITY_SCHEMA,
             }
         },
     )

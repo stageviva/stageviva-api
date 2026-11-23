@@ -1959,8 +1959,12 @@ def _run_import_worker(stop: threading.Event) -> None:
                     worked = True
                 else:
                     queue.reconcile_reviews(authorised)
-                    worked = queue.match_one(authorised, lambda oid, opportunity, db:
-                        _match_opportunity_against_registered_artists(oid, opportunity, db, max_new_matches=1))
+                    def matcher(oid, opportunity, db):
+                        result = _match_opportunity_against_registered_artists(oid, opportunity, db, max_new_matches=1)
+                        if result.get("queued_notifications"):
+                            _deliver_queued_push_notifications(db)
+                        return result
+                    worked = queue.match_saved_one(authorised, matcher) or queue.match_one(authorised, matcher)
             except Exception:
                 logger.exception("Opportunity import worker could not finish its iteration")
             finally:
@@ -2221,12 +2225,12 @@ def admin_update_opportunity(
         changed = True
     if payload.visible is not None:
         changed = storage.set_opportunity_visibility(opportunity_id, payload.visible) or changed
-    match_result = (
-        _match_opportunity_against_registered_artists(opportunity_id, updated_opportunity, storage)
-        if updated_opportunity is not None and effective_visible else {"matched_artists": 0, "queued_notifications": 0}
-    )
-    delivery = _deliver_queued_push_notifications(storage) if effective_visible else {}
-    return {"ok": True, **match_result, "notification_delivery": delivery}
+    matching = effective_visible and changed
+    if matching:
+        ImportQueue(storage, IMPORTS_DIR).queue_saved_match(opportunity_id, admin["id"])
+        _start_import_worker()
+    return {"ok": True, "matched_artists": 0, "queued_notifications": 0,
+            "matching_status": "pending" if matching else "not_needed", "notification_delivery": {}}
 
 
 @app.post("/admin/opportunities/analyse-url")
@@ -2326,9 +2330,10 @@ def admin_add_opportunity(
     opportunity_id = storage.upsert_opportunity(item, opportunity, hidden_reason=None if payload.visible else "manual")
     if not payload.visible:
         return {"id": opportunity_id, "matched_artists": 0, "queued_notifications": 0, "notification_delivery": {}}
-    match_result = _match_opportunity_against_registered_artists(opportunity_id, opportunity, storage)
-    delivery = _deliver_queued_push_notifications(storage)
-    return {"id": opportunity_id, **match_result, "notification_delivery": delivery}
+    ImportQueue(storage, IMPORTS_DIR).queue_saved_match(opportunity_id, admin["id"])
+    _start_import_worker()
+    return {"id": opportunity_id, "matched_artists": 0, "queued_notifications": 0,
+            "matching_status": "pending", "notification_delivery": {}}
 
 
 def _tracked_opportunity_payload(item: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:

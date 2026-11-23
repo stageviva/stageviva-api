@@ -119,6 +119,19 @@ class ImportQueueTest(unittest.TestCase):
             self.assertEqual(self.process()["status"], "needs_information")
         self.ai.assert_not_called()
 
+    def test_failed_extraction_keeps_safe_stage_and_code_without_repeating_provider(self):
+        self.enqueue()
+        error = RuntimeError("secret signed URL https://example.org/?token=private")
+        error.status_code = 400
+        error.body = {"code": "invalid_json_schema"}
+        self.ai.side_effect = error
+        result = self.process()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failure_code"], "analysis_format_error")
+        self.assertEqual(result["failure_stage"], "analysing")
+        self.assertNotIn("private", result["message"])
+        self.ai.assert_called_once()
+
     def test_bad_and_oversized_screenshots_rejected_before_queueing(self):
         for images in ([b"not an image"], [screenshot()] * 6, [b"x" * (8 * 1024 * 1024 + 1)]):
             with self.assertRaises(ImportInputError): self.enqueue(images=images)
@@ -346,10 +359,12 @@ class ImportApiTest(unittest.TestCase):
             oid = storage.upsert_opportunity(DiscoveredOpportunity("Company dancers", "https://example.org/held", "StageViva import", "https://example.org/held", "manual"), document, hidden_reason="needs_verification")
         finally:
             storage.close()
-        with patch.object(api, "_match_opportunity_against_registered_artists", return_value={}), patch.object(api, "_deliver_queued_push_notifications", return_value={}):
+        with patch.object(api, "_match_opportunity_against_registered_artists", return_value={}) as matcher, patch.object(api, "_deliver_queued_push_notifications", return_value={}) as delivery:
             response = self.client.patch(f"/admin/opportunities/{oid}", headers=headers,
                 json={"official_url": "https://company.org/", "review_confirmed": True, "visible": True})
         self.assertEqual(response.status_code, 200, response.text)
+        matcher.assert_not_called(); delivery.assert_not_called()
+        self.assertEqual(response.json()["matching_status"], "pending")
         storage = StageVivaStorage(api.DATABASE_PATH)
         try:
             current = storage.get_opportunity_for_admin(oid)
