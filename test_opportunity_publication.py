@@ -126,6 +126,32 @@ class PublicationPolicyTest(unittest.TestCase):
         document["stageviva_review"]["sources"] = [{"url": "stageviva-upload://one", "type": "caption", "text": "Application deadline: 16 November 2026. For questions, contact tickets@example.org"}]
         self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"], {})
 
+    def test_recovered_supplied_website_completes_readiness_without_model_blockers(self):
+        document = ready()
+        document["stageviva_review"].update(pathway={}, ready_for_publication=False, blocking_reasons=[], sources=[
+            {"url": "https://company.org/ballet", "requested_url": "https://company.org/ballet", "type": "linked_page", "text": "Company ballet auditions. Applications are open."}])
+        repaired = prepare_publication(document, "https://company.org/ballet")
+        self.assertIsNone(publication_reason(repaired))
+        self.assertTrue(repaired["stageviva_review"]["application_recovered_from_source"])
+        self.assertFalse(document["stageviva_review"]["ready_for_publication"])
+        for blockers in (["critical_requirements_unclear"], ["application_missing", "critical_requirements_unclear"]):
+            document["stageviva_review"]["blocking_reasons"] = blockers
+            self.assertIsNotNone(publication_reason(prepare_publication(document, "https://company.org/ballet")))
+        document["stageviva_review"].update(blocking_reasons=[], sources=[])
+        self.assertIsNotNone(publication_reason(prepare_publication(document, "https://company.org/ballet")))
+
+    def test_saved_hold_recovers_website_and_publishes_without_ai(self):
+        document = ready()
+        document["stageviva_review"].update(pathway={}, ready_for_publication=False, blocking_reasons=[], review_policy="source-ready-v3", sources=[
+            {"url": "https://company.org/ballet", "type": "linked_page", "text": "Company ballet auditions. Applications are open."}])
+        jid, oid = self.held(document)
+        self.queue.update(jid, reference_url="https://company.org/ballet")
+        with patch("opportunity_imports.analyse_opportunity") as ai, patch("opportunity_imports.fetch_public_html") as fetch:
+            self.assertEqual(self.queue.reconcile_reviews(lambda _: True), 1)
+            self.assertEqual(self.queue.reconcile_reviews(lambda _: True), 0)
+            ai.assert_not_called(); fetch.assert_not_called()
+        self.assertTrue(self.storage.get_opportunity_for_admin(oid)["visible"])
+
     def test_legacy_source_is_clickable_without_claiming_a_verified_apply_route(self):
         item = {"opportunity_id": "legacy", "listing_url": "https://balletplaces.com/auditions/example", "opportunity": {"identity": {"title": {"value": "Dancers"}}}, "match": {}}
         detail = opportunity_detail(item)

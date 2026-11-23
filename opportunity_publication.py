@@ -9,16 +9,19 @@ from opportunity_source_facts import complete_source_facts
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_policy import is_non_performer_opportunity, is_school_or_training_opportunity
 
-PUBLICATION_POLICY = "source-ready-v3"
+PUBLICATION_POLICY = "source-ready-v4"
 
 
-def _resolved_application(result: dict) -> dict:
+def _resolved_application(result: dict, *, recovered: bool = False) -> dict:
     review = result.get("stageviva_review", {})
     blockers = review.get("blocking_reasons") or []
     if (review.get("decision") == VALID and application_pathway(result)
-            and "application_missing" in blockers):
+            and ("application_missing" in blockers or recovered)):
         review["blocking_reasons"] = [reason for reason in blockers if reason != "application_missing"]
-        review["resolved_blockers"] = list(dict.fromkeys([*(review.get("resolved_blockers") or []), "application_missing"]))
+        if "application_missing" in blockers:
+            review["resolved_blockers"] = list(dict.fromkeys([*(review.get("resolved_blockers") or []), "application_missing"]))
+        if recovered:
+            review["application_recovered_from_source"] = True
         if (not review["blocking_reasons"] and not review.get("conflicts")
                 and all(str(value_at(result, "identity", key) or "").strip().casefold() not in {"", "unknown", "not specified", "n/a"} for key in ("title", "organisation"))):
             review["ready_for_publication"] = True
@@ -54,7 +57,7 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
             quote = prefix.strip() + " " + match.group()
             review["pathway"] = {"kind": "email", "target": match.group(), "evidence": [quote]}
             result.setdefault("application", {})["email"] = {"value": match.group(), "evidence": [quote], "confidence": "high"}
-            return _resolved_application(result)
+            return _resolved_application(result, recovered=True)
     # Employer-website fallback must be explicitly supplied and actually
     # retrieved. A directory or arbitrary first link is not promoted.
     normalized = unwrap_source_urls(text)
@@ -80,7 +83,7 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
         review["pathway"] = {"kind": "official_website", "target": url, "evidence": [quote]}
         result.setdefault("source", {})["official_url"] = {"value": url, "evidence": [quote], "confidence": "high"}
         break
-    return _resolved_application(result)
+    return _resolved_application(result, recovered=bool(application_pathway(result)))
 
 
 def publication_reason(opportunity: dict) -> str | None:
