@@ -144,8 +144,9 @@ def review_reason(opportunity: dict) -> str | None:
         return "needs_verification"
     if not application_pathway(opportunity):
         return "unverified_application"
+    required_identity = ("title", "opportunity_type", "description") if review.get("required_content_version") == "complete-opportunity-v1" else ("title", "organisation")
     if any(str(value_at(opportunity, "identity", key) or "").strip().casefold() in {"", "unknown", "not specified", "n/a"}
-           for key in ("title", "organisation")):
+           for key in required_identity):
         return "needs_verification"
     return None
 

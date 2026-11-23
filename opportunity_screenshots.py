@@ -22,16 +22,20 @@ def read_screenshot(path: Path, max_characters: int, *, timeout: int = 20) -> st
     deadline = time.monotonic() + (timeout or 20)
     parts = []
     primary_at_limit = False
+    primary_complete = False
     try:
         primary = _primary_reader(path, max_characters, timeout=max(1, min(7, timeout or 7)))
         primary_at_limit = len(primary) >= max_characters
         parts.append(primary)
+        primary_complete = bool(primary.strip())
     except Exception:
         # The band passes may still read a screenshot with mixed photo/text.
         pass
     with Image.open(path) as source:
         image = ImageOps.exif_transpose(source).convert("L")
-        for region in screenshot_regions(*image.size):
+        regions = screenshot_regions(*image.size)
+        completed_regions = 0
+        for region in regions:
             remaining = deadline - time.monotonic()
             if remaining < 1:
                 break
@@ -41,10 +45,13 @@ def read_screenshot(path: Path, max_characters: int, *, timeout: int = 20) -> st
             band = ImageOps.autocontrast(band)
             try:
                 text = pytesseract.image_to_string(band, lang="eng", config="--psm 6", timeout=max(1, min(4, int(remaining))))
+                completed_regions += 1
                 if text.strip():
                     parts.append(text.strip())
             except Exception:
                 continue
+        if not primary_complete and completed_regions != len(regions):
+            raise ValueError("The complete screenshot could not be read within the time limit")
     # Preserve reading order inside each pass. Repeated lines from overlap need
     # not enlarge the prompt or make the same deadline look like two facts.
     seen, lines = set(), []

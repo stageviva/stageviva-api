@@ -27,7 +27,7 @@ CAPTION = "Cruise company seeks production dancers for an onboard performing con
 def ready():
     field = lambda value: {"value": value, "evidence": [CAPTION], "confidence": "high"}
     return {
-        "identity": {"title": field("Cruise production dancers"), "organisation": field("Example Cruises"), "opportunity_type": field("Performing contract")},
+        "identity": {"title": field("Cruise production dancers"), "organisation": field("Example Cruises"), "opportunity_type": field("Performing contract"), "description": field("Production dancers for an onboard performing contract.")},
         "location": {"city": field("London"), "country": field("United Kingdom")},
         "dates": {"application_deadline": field("2099-12-31")},
         "overall_confidence": "high",
@@ -397,6 +397,15 @@ class ImportApiTest(unittest.TestCase):
         finally: storage.close()
         result = self.client.get("/admin/opportunity-imports", headers=headers).json()[0]
         self.assertEqual(result["status"], "published")
+        alerts = self.client.get("/admin/opportunity-import-notifications", headers=headers)
+        self.assertEqual(alerts.status_code, 200)
+        self.assertEqual(alerts.json()[0]["id"], result["id"])
+        self.assertIn("is live", alerts.json()[0]["title"])
+        other = self.headers("other@example.com")
+        self.assertEqual(self.client.get("/admin/opportunity-import-notifications", headers=other).json(), [])
+        self.assertEqual(self.client.post(f"/admin/opportunity-import-notifications/{result['id']}/read", headers=other).status_code, 404)
+        self.assertEqual(self.client.post(f"/admin/opportunity-import-notifications/{result['id']}/read", headers=headers).status_code, 200)
+        self.assertIsNotNone(self.client.get("/admin/opportunity-import-notifications", headers=headers).json()[0]["read_at"])
         self.assertEqual(result["source_url"], "")
         opportunity = self.client.get("/admin/opportunities", headers=headers).json()[0]
         self.assertEqual(opportunity["listing_url"], "")
@@ -408,6 +417,7 @@ class ImportApiTest(unittest.TestCase):
         data = {"source_url": URL, "request_id": "api_request_123", "caption": CAPTION}
         self.assertEqual(self.client.get("/admin/opportunity-imports").status_code, 401)
         self.assertEqual(self.client.get("/admin/opportunity-imports", headers=normal).status_code, 403)
+        self.assertEqual(self.client.get("/admin/opportunity-import-notifications", headers=normal).status_code, 403)
         self.assertEqual(self.client.post("/admin/opportunity-imports", data=data, headers=normal).status_code, 403)
         response = self.client.post("/admin/opportunity-imports", data=data, files=[("screenshots", ("../../poster.png", screenshot(), "image/png"))], headers=owner)
         self.assertEqual(response.status_code, 202, response.text)

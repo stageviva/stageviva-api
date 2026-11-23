@@ -20,6 +20,43 @@ from test_opportunity_imports import ready, CAPTION
 
 
 class PublicationPolicyTest(unittest.TestCase):
+    def test_new_import_requires_title_type_and_description_and_a_real_apply_route(self):
+        for key in ("title", "opportunity_type", "description"):
+            document = ready()
+            document["stageviva_review"]["required_content_version"] = "complete-opportunity-v1"
+            document["identity"][key]["value"] = "unknown"
+            self.assertEqual(publication_reason(document), "missing_" + key)
+        document = ready()
+        document["stageviva_review"]["required_content_version"] = "complete-opportunity-v1"
+        document["identity"]["organisation"]["value"] = "unknown"
+        self.assertIsNone(publication_reason(document))
+        document["stageviva_review"].update(ready_for_publication=False, blocking_reasons=[])
+        self.assertIsNone(publication_reason(prepare_publication(document)))
+        document["stageviva_review"]["blocking_reasons"] = ["conflicting_application_methods"]
+        self.assertIsNotNone(publication_reason(prepare_publication(document)))
+
+    def test_unlabelled_announcement_url_can_be_a_fetched_website_fallback(self):
+        document = ready()
+        document["stageviva_review"].update(pathway={}, sources=[
+            {"type": "caption", "url": "stageviva-upload://one", "text": "Auditions. www.company.org/auditions"},
+            {"type": "linked_page", "url": "https://company.org/auditions", "requested_url": "https://www.company.org/auditions", "text": "Company auditions. Apply here."}])
+        self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"]["target"], "https://company.org/auditions")
+        document["stageviva_review"]["sources"].pop()
+        self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"], {})
+
+    def test_import_updates_survive_reopen_and_are_private_and_readable(self):
+        jid, oid = self.held()
+        self.queue.update(jid, status="published", message="Published. Preparing matches.")
+        self.assertEqual(self.queue.notifications("other-owner"), [])
+        self.assertFalse(self.queue.mark_notification_read("other-owner", jid))
+        alerts = self.queue.notifications("owner")
+        self.assertEqual(alerts[0]["opportunity_id"], oid)
+        self.assertIn("is live", alerts[0]["title"])
+        self.assertIsNone(alerts[0]["read_at"])
+        self.assertTrue(self.queue.mark_notification_read("owner", jid))
+        reopened = ImportQueue(self.storage, Path(self.temp.name) / "images")
+        self.assertIsNotNone(reopened.notifications("owner")[0]["read_at"])
+
     def test_typography_differences_preserve_evidence_but_changed_facts_do_not(self):
         self.assertTrue(supported_excerpt("Company's dancers - full-time", "Company’s dancers – full-time"))
         self.assertFalse(supported_excerpt("No experience required", "Experience required"))

@@ -41,14 +41,17 @@ def _resolved_application(result: dict, *, recovered: bool = False) -> dict:
     review = result.get("stageviva_review", {})
     blockers = review.get("blocking_reasons") or []
     if (review.get("decision") == VALID and application_pathway(result)
-            and ("application_missing" in blockers or recovered)):
+            and ("application_missing" in blockers or recovered
+                 or (review.get("required_content_version") == "complete-opportunity-v1"
+                     and "ready_for_publication" in review and not blockers))):
         review["blocking_reasons"] = [reason for reason in blockers if reason != "application_missing"]
         if "application_missing" in blockers:
             review["resolved_blockers"] = list(dict.fromkeys([*(review.get("resolved_blockers") or []), "application_missing"]))
         if recovered:
             review["application_recovered_from_source"] = True
+        required_identity = ("title", "opportunity_type", "description") if review.get("required_content_version") == "complete-opportunity-v1" else ("title", "organisation")
         if (not review["blocking_reasons"] and not review.get("conflicts")
-                and all(str(value_at(result, "identity", key) or "").strip().casefold() not in {"", "unknown", "not specified", "n/a"} for key in ("title", "organisation"))):
+                and all(str(value_at(result, "identity", key) or "").strip().casefold() not in {"", "unknown", "not specified", "n/a"} for key in required_identity)):
             review["ready_for_publication"] = True
     return result
 
@@ -90,6 +93,12 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
     normalized = re.sub(r"(\b(?:website|official\s+site)\s*:?\s*)(?!https?://|www\.)([A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,63}(?:/[^\s<>\"']*)?)", r"\1https://\2", normalized, flags=re.I)
     normalized = unwrap_source_urls(normalized)
     labelled = {url.rstrip(".,;:!?)") for url in re.findall(r"\b(?:official\s+(?:website|site)|website)\s*:?\s*(https?://[^\s<>\"']+)", normalized, re.I)}
+    # A URL printed in the uploaded announcement is an explicitly supplied
+    # destination too, even when it has no literal "Website:" label.
+    for source in sources:
+        if isinstance(source, dict) and source.get("type") == "caption":
+            for url in re.findall(r"(?:https?://|www\.)[^\s<>\"']+", unwrap_source_urls(str(source.get("text", "")))):
+                labelled.add(("https://" + url if url.startswith("www.") else url).rstrip(".,;:!?)"))
     if reference_url:
         labelled.add(reference_url)
     for source in sources:
@@ -114,6 +123,10 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
 
 def publication_reason(opportunity: dict) -> str | None:
     review = opportunity.get("stageviva_review", {})
+    if review.get("required_content_version") == "complete-opportunity-v1":
+        for key in ("title", "opportunity_type", "description"):
+            if str(value_at(opportunity, "identity", key) or "").strip().casefold() in {"", "unknown", "not specified", "n/a"}:
+                return "missing_" + key
     reason = review_reason(opportunity)
     if review.get("decision") != VALID:
         return reason or "needs_verification"

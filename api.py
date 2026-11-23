@@ -1993,6 +1993,18 @@ def admin_list_imports(admin: AdminUser, storage: Storage) -> list[dict[str, Any
     return ImportQueue(storage, IMPORTS_DIR).list(admin["id"])
 
 
+@app.get("/admin/opportunity-import-notifications")
+def admin_import_notifications(admin: AdminUser, storage: Storage) -> list[dict[str, Any]]:
+    return ImportQueue(storage, IMPORTS_DIR).notifications(admin["id"])
+
+
+@app.post("/admin/opportunity-import-notifications/{job_id}/read")
+def admin_read_import_notification(job_id: str, admin: AdminUser, storage: Storage) -> dict[str, bool]:
+    if not ImportQueue(storage, IMPORTS_DIR).mark_notification_read(admin["id"], job_id):
+        raise HTTPException(status_code=404, detail="Import update not found.")
+    return {"ok": True}
+
+
 @app.post("/admin/opportunity-imports", status_code=202)
 async def admin_create_import(
     admin: AdminUser, storage: Storage,

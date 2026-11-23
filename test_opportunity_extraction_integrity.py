@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from opportunity_evidence import numbered_sources, resolve_citations
+from opportunity_evidence import citation_schema, numbered_sources, resolve_citations
 from opportunity_intelligence import analyse_opportunity, extract_useful_text
 from opportunity_publication import prepare_publication, publication_reason
 from opportunity_quality import VALID, application_pathway, apply_source_evidence
@@ -32,6 +32,22 @@ Website: https://company.org/auditions
 
 
 class ExtractionIntegrityTest(unittest.TestCase):
+    def test_provider_schema_only_allows_real_source_ids_and_requires_role_evidence(self):
+        _, references = numbered_sources([{"url": "one", "text": "Audition for company dancers"}])
+        schema = citation_schema(OPPORTUNITY_SCHEMA, references)
+        self.assertEqual(schema["$defs"]["source_reference"]["enum"], list(references))
+        self.assertEqual(schema["properties"]["classification"]["properties"]["evidence"]["minItems"], 1)
+        self.assertEqual(schema["properties"]["identity"]["properties"]["description"]["properties"]["evidence"]["items"], {"$ref": "#/$defs/source_reference"})
+        self.assertNotIn("$defs", OPPORTUNITY_SCHEMA)
+        text, bounded = numbered_sources([{"url": "one", "text": "x\n" * 22000}])
+        self.assertLess(len(bounded), 900)
+        self.assertEqual(sum(quote.count("x") for token, quote in bounded.items() if not token.endswith(":L1]]")), 22000)
+        _, longest = numbered_sources([{"url": "one", "text": "x\n" * 22500}, {"url": "two", "text": "x\n" * 8000}, {"url": "three", "text": "x\n" * 8000}])
+        def enum_count(node):
+            if isinstance(node, dict): return len(node.get("enum", [])) + sum(enum_count(value) for value in node.values())
+            return sum(enum_count(value) for value in node) if isinstance(node, list) else 0
+        self.assertLessEqual(enum_count(citation_schema(OPPORTUNITY_SCHEMA, longest)), 1000)
+
     def extract(self, bad_title_reference=False):
         def response(**request):
             passages = dict(re.findall(r"(\[\[S\d+:L\d+\]\]) ([^\n]+)", request["input"]))
@@ -149,3 +165,11 @@ class ScreenshotCoverageTest(unittest.TestCase):
             with patch("opportunity_screenshots._primary_reader", return_value="A" * 200), patch("pytesseract.image_to_string", return_value=""):
                 with self.assertRaises(ValueError):
                     read_screenshot(path, 100)
+
+    def test_partial_ocr_timeout_does_not_masquerade_as_a_complete_screenshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "caption.png"
+            Image.new("RGB", (400, 900), "white").save(path)
+            with patch("opportunity_screenshots._primary_reader", side_effect=RuntimeError("timeout")), patch("pytesseract.image_to_string", side_effect=["Header", RuntimeError("timeout"), "Deadline"]):
+                with self.assertRaisesRegex(ValueError, "complete screenshot"):
+                    read_screenshot(path, 12000)

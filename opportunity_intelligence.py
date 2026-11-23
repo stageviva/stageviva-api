@@ -21,7 +21,7 @@ from opportunity_schema import OPPORTUNITY_SCHEMA
 from opportunity_quality import (REVIEW, VALID, PATHWAY_LABELS, apply_source_evidence,
                                  safe_application_url, safe_official_website, supported_excerpt, valid_application_email, validate_shape)
 from opportunity_source_facts import complete_source_facts
-from opportunity_evidence import numbered_sources, resolve_citations
+from opportunity_evidence import citation_schema, numbered_sources, resolve_citations
 from opportunity_publication import prepare_publication
 from public_source import PublicSourceError, fetch_public_html
 
@@ -882,7 +882,7 @@ def analyse_opportunity(
         except PublicSourceError as error:
             research_error = f"{research_error}; {error}" if research_error else str(error)
     evidence_text = "\n\n".join(f"Source URL: {source['url']}\n{source['text']}" for source in sources)
-    fingerprint = hashlib.sha256(("numbered-evidence-v1\n" + evidence_text).encode()).hexdigest()
+    fingerprint = hashlib.sha256(("constrained-evidence-v2\n" + evidence_text).encode()).hexdigest()
     numbered_text, citations = numbered_sources(sources)
     if previous and previous.get("stageviva_review", {}).get("content_hash") == fingerprint:
         return previous
@@ -941,6 +941,13 @@ Keep the employer in organisation and pay in compensation. Title evidence
 must quote source text that supports the role, even when the title is rewritten.
 
 Write performer requirements as concise English phrases in sentence case.
+Write identity.description in your own clear words: explain the actual dancer
+role, setting and main requirements using only supplied facts. Do not copy the
+announcement wholesale. A source without a headline still needs a generated
+specific title, an opportunity type and a useful description. Do not invent
+an employer, salary, application destination or unstated eligibility criteria.
+An unnamed employer alone is not a blocker when the dancer role and application
+method are clear. Leave its organisation unknown instead of making one up.
 Use one explicit requirement per experience.criteria item, with its own source
 excerpt. Capture years, training, credentials, repertoire and previous work
 where stated. Keep the required_level field as a factual summary for matching.
@@ -1006,7 +1013,7 @@ advertised job's facts. Never invent missing details to make a listing complete.
                 "type": "json_schema",
                 "name": "stageviva_opportunity",
                 "strict": True,
-                "schema": OPPORTUNITY_SCHEMA,
+                "schema": citation_schema(OPPORTUNITY_SCHEMA, citations),
             }
         },
     )

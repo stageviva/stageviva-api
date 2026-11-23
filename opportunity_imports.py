@@ -9,6 +9,7 @@ import re
 import sqlite3
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -157,6 +158,36 @@ class ImportQueue:
                     raise
         self.db.commit()
 
+        if "notification_read_at" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+            try:
+                self.db.execute("ALTER TABLE opportunity_imports ADD COLUMN notification_read_at TEXT")
+            except sqlite3.OperationalError:
+                if "notification_read_at" not in {row[1] for row in self.db.execute("PRAGMA table_info(opportunity_imports)")}:
+                    raise
+        self.db.commit()
+
+    def notifications(self, owner_id: str):
+        rows = self.db.execute("""SELECT * FROM opportunity_imports WHERE owner_id=?
+            AND status IN ('published','review','duplicate','failed','paused','interrupted','needs_information')
+            ORDER BY updated_at DESC LIMIT 30""", (owner_id,)).fetchall()
+        results = []
+        for row in rows:
+            job = self.public(dict(row))
+            published = job["status"] == "published"
+            title = job["title"] if job["title"] and job["title"] != "unknown" else "Opportunity"
+            results.append({"id": row["id"], "opportunity_id": job["opportunity_id"],
+                "title": f"{title} is live" if published else f"{title}: {job['status'].replace('_', ' ')}",
+                "body": "Added to StageViva. Matches may still be preparing." if published else job["message"],
+                "status": job["status"], "read_at": row["notification_read_at"],
+                "created_at": datetime.fromtimestamp(row["updated_at"], timezone.utc).isoformat()})
+        return results
+
+    def mark_notification_read(self, owner_id: str, job_id: str) -> bool:
+        result = self.db.execute("UPDATE opportunity_imports SET notification_read_at=? WHERE id=? AND owner_id=?",
+            (datetime.now(timezone.utc).isoformat(), job_id, owner_id))
+        self.db.commit()
+        return result.rowcount == 1
+
     def get(self, job_id: str, owner_id: str | None = None):
         row = self.db.execute("SELECT * FROM opportunity_imports WHERE id=?" + (" AND owner_id=?" if owner_id else ""),
                               (job_id, owner_id) if owner_id else (job_id,)).fetchone()
@@ -177,7 +208,12 @@ class ImportQueue:
         notes = []
         review = opportunity.get("stageviva_review", {})
         if job["status"] == "review":
+            for key, label in (("opportunity_type", "opportunity type"), ("description", "description")):
+                if str(value_at(opportunity, "identity", key) or "").strip().casefold() in {"", "unknown", "not specified", "n/a"}:
+                    notes.append(f"A clear {label} could not be produced from this material. Add the full announcement or a clearer screenshot, then reanalyse.")
             for key, label in (("title", "job title"), ("organisation", "employer name")):
+                if key == "organisation" and review.get("required_content_version") == "complete-opportunity-v1":
+                    continue
                 if str(value_at(opportunity, "identity", key) or "").strip().casefold() in {"", "unknown", "not specified", "n/a"}:
                     notes.append(f"The {label} was not captured. Add the missing announcement text below and reanalyse.")
             if not application_pathway(opportunity):
@@ -301,6 +337,8 @@ class ImportQueue:
                         reference_url=reference_url,
                         replacement_hash=replacement_hash,
                         source_text=None if changed else job["source_text"], opportunity_json=None)
+            self.db.execute("UPDATE opportunity_imports SET notification_read_at=NULL WHERE id=?", (job_id,))
+            self.db.commit()
         else:
             raise ImportInputError("This import is already processing or has finished. Open its review instead.")
         return self.public(self.get(job_id))
@@ -393,6 +431,7 @@ class ImportQueue:
                 text, links, kind = self.read_source(job)
                 self.update(job_id, status="analysing", message="Reading the announcement and linked application pages.")
                 opportunity = analyse_opportunity(url, listing_text=text, research_urls=links, listing_text_kind=kind)
+                opportunity.setdefault("stageviva_review", {})["required_content_version"] = "complete-opportunity-v1"
                 opportunity = prepare_publication(opportunity, job["reference_url"])
                 if screenshot_source(url):
                     for field in opportunity.get("source", {}).values():
@@ -425,7 +464,7 @@ class ImportQueue:
             if duplicate:
                 reason = "duplicate"
                 review["duplicate_of"] = duplicate["id"]
-            opportunity_id = self.storage.upsert_opportunity(item, opportunity, hidden_reason=reason)
+            opportunity_id = self.storage.upsert_opportunity(item, opportunity, hidden_reason="needs_information" if reason and reason.startswith("missing_") else reason)
             self.update(job_id, status="duplicate" if duplicate else "review" if reason else "published", opportunity_id=opportunity_id,
                         replacement_hash="",
                         matching_status="" if reason else "pending",
