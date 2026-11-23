@@ -70,6 +70,7 @@ class ExtractionIntegrityTest(unittest.TestCase):
         self.assertEqual(result["dates"]["contract_end"]["value"], "2028-06-30")
         self.assertEqual(result["requirements"]["discipline_requirements"]["classical_ballet"]["required_level"], "high")
         self.assertEqual(result["requirements"]["discipline_requirements"]["contemporary"]["required_level"], "high")
+        self.assertEqual(result["requirements"]["styles"]["value"], ["Classical ballet", "Contemporary"])
         self.assertEqual(application_pathway(result)["target"], "https://forms.example.org/company-2027")
         self.assertIsNone(publication_reason(result))
 
@@ -98,10 +99,18 @@ class ExtractionIntegrityTest(unittest.TestCase):
             self.assertEqual(document["stageviva_review"]["blocking_reasons"], blockers)
 
     def test_audition_ranges_are_not_contract_dates_and_missing_years_stay_unknown(self):
+        recovered = complete_source_facts({}, "Full-Time Contracts\ni 1 July 2027 - 30 June 2028")
+        self.assertEqual(recovered["dates"]["contract_start"]["value"], "2027-07-01")
         for text in ("Audition: 27 February 2027 – 28 February 2027", "Contracts: 1 July – 30 June", "Contract season 2027/28"):
             self.assertNotIn("contract_start", complete_source_facts({}, text).get("dates", {}))
         conflicting = complete_source_facts({}, "Contracts: 1 July 2027 – 30 June 2028. Contracts: 1 August 2027 – 30 June 2028.")
         self.assertTrue(conflicting["stageviva_review"]["conflicts"])
+
+    def test_recovered_styles_preserve_existing_styles_without_duplicate_ballet(self):
+        original = {"requirements": {"styles": {"value": ["Ballet", "Jazz"], "evidence": ["Jazz required"], "confidence": "high"}}}
+        recovered = complete_source_facts(original, ANNOUNCEMENT)
+        self.assertEqual(recovered["requirements"]["styles"]["value"], ["Ballet", "Jazz", "Contemporary"])
+        self.assertEqual(original["requirements"]["styles"]["value"], ["Ballet", "Jazz"])
 
     def test_main_article_is_kept_without_account_modal_noise(self):
         notice = "Example Ballet seeks company dancers. Applications close 7 December 2026. Strong classical ballet required."

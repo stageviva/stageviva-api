@@ -15,7 +15,7 @@ from opportunity_quality import value_at
 MONTH = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 DATE = rf"(?:\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTH}\s*,?\s*20\d{{2}}|{MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?\s*,?\s*20\d{{2}})"
 DEADLINE = re.compile(rf"\b(?:application\s+deadline|deadline|apply\s+(?:by|before)|applications?\s+(?:close|closing))\b[^\w\d]{{0,30}}(?P<date>{DATE})", re.I)
-CONTRACT_RANGE = re.compile(rf"\b(?:contracts?(?:\s+(?:dates|period|duration))?|employment(?:\s+period)?|full[- ]time\s+contracts?)\s*:?\s*[^\w\d]{{0,20}}(?P<start>{DATE})\s*(?:–|—|-|to|until|through)\s*(?P<end>{DATE})", re.I)
+CONTRACT_RANGE = re.compile(rf"\b(?:contracts?(?:\s+(?:dates|period|duration))?|employment(?:\s+period)?|full[- ]time\s+contracts?)\s*:?\s*[^\w\d]{{0,20}}(?:[A-Za-z]\s+)?(?P<start>{DATE})\s*(?:–|—|-|to|until|through)\s*(?P<end>{DATE})", re.I)
 LEVELS = {"excellent": "high", "advanced": "high", "strong": "high", "exceptional": "very_high", "outstanding": "very_high", "intermediate": "medium", "basic": "low"}
 DISCIPLINES = {"classical": "classical_ballet", "classical ballet": "classical_ballet", "ballet": "classical_ballet", "contemporary": "contemporary", "jazz": "jazz", "improvisation": "improvisation", "tap": "tap", "partnering": "partnering", "acrobatics": "acrobatics"}
 NAMES = r"(?:classical(?:\s+ballet)?|ballet|contemporary|jazz|improvisation|tap|partnering|acrobatics)\b"
@@ -95,6 +95,14 @@ def complete_source_facts(opportunity: dict, text: str | None = None) -> dict:
             discipline = DISCIPLINES[name.group().lower()]
             if not known(requirements.get(discipline, {}).get("required_level")):
                 requirements[discipline] = {"required_level": LEVELS[match["level"].lower()], "evidence": [match.group()], "confidence": "high", "assessment_basis": "explicit"}
+            styles = result["requirements"].setdefault("styles", {"value": [], "evidence": [], "confidence": "unknown"})
+            if isinstance(styles, dict):
+                values = styles.get("value") if isinstance(styles.get("value"), list) else []
+                if not any(DISCIPLINES.get(str(value).casefold()) == discipline for value in values):
+                    labels = {"classical_ballet": "Classical ballet"}
+                    styles["value"] = [*values, labels.get(discipline, discipline.capitalize())]
+                    styles["evidence"] = list(dict.fromkeys([*(styles.get("evidence") or []), match.group()]))
+                    styles["confidence"] = "high"
     if conflicts:
         review["conflicts"] = list(dict.fromkeys(conflicts))
     return result
