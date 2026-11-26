@@ -32,6 +32,23 @@ Website: https://company.org/auditions
 
 
 class ExtractionIntegrityTest(unittest.TestCase):
+    def test_news_archive_uses_matching_audition_dates_without_old_deadlines(self):
+        html = '<h2>Looking for dancers</h2><p>Professional dancers wanted. Audition 13 December 2026 at House of Dance Art, Prague. Apply by 6 December 2026. Send CV, photo and video to casting@example.org. Three years of professional experience required.</p><h2>Additional audition</h2><p>Professional dancers wanted. Apply by 31 August 2026. Audition in Prague. Send CV and video. We offer contracts and seek experienced dancers for the company and its new repertoire.</p>'
+        text = extract_useful_text(html, role_text="Company dancers. Audition 2026-12-13. Deadline 2026-12-06")
+        self.assertIn("House of Dance Art", text)
+        self.assertNotIn("31 August", text)
+        from opportunity_intelligence import extract_official_application_url
+        self.assertEqual(extract_official_application_url('<a href="/banner.png">Audition</a><a href="/news/">We are looking for dancers</a>', "https://company.org/", prefer_link=True), "https://company.org/news/")
+    def test_linked_page_keeps_job_location_dates_pay_and_requirements_from_published_data(self):
+        html = '<main>Company auditions.</main><script type="application/ld+json">{"@type":"JobPosting","jobLocation":{"address":{"addressLocality":"Prague","addressCountry":"CZ"}},"validThrough":"2026-12-06","baseSalary":"Paid contract","qualifications":"Advanced contemporary technique"}</script>'
+        text = extract_useful_text(html)
+        for fact in ("Prague", "CZ", "2026-12-06", "Paid contract", "Advanced contemporary technique"):
+            self.assertIn(fact, text)
+
+    def test_company_homepage_can_research_an_auditions_link_from_navigation(self):
+        from opportunity_intelligence import extract_official_application_url
+        html = '<nav><a href="/auditions">Auditions</a></nav><main>Company repertoire</main>'
+        self.assertEqual(extract_official_application_url(html, "https://company.org/", prefer_link=True), "https://company.org/auditions")
     def test_numbered_sources_preserve_every_word_without_fragmenting_the_prompt(self):
         text, bounded = numbered_sources([{"url": "one", "text": "x\n" * 22000}])
         self.assertLess(len(bounded), 900)

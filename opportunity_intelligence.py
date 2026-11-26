@@ -87,14 +87,16 @@ def extract_official_application_url(html: str, listing_url: str, *, prefer_link
         return listing_url if safe_application_url(listing_url) else ""
     candidates: list[tuple[int, str]] = []
     soup = BeautifulSoup(html, "html.parser")
-    for element in soup(["nav", "footer", "header", "aside"]):
+    for element in soup(["footer", "aside"]):
         element.decompose()
     for link in soup.find_all("a", href=True):
         href = urljoin(listing_url, str(link["href"]).strip())
+        if re.search(r"\.(?:png|jpe?g|webp|gif|svg)(?:\?|$)", href, re.I):
+            continue
         if not safe_application_url(href) or _is_directory_url(href):
             continue
         text = link.get_text(" ", strip=True).lower()
-        if not re.search(r"\b(apply(?:ing)?|applications?|official audition|official announcement|vacancy|casting)\b", text):
+        if not re.search(r"\b(apply(?:ing)?|applications?|auditions?|official announcement|vacanc(?:y|ies)|casting|careers?)\b|\b(?:looking for|seeking|hiring)\b.{0,50}\b(?:dancers?|artists?)\b", text):
             continue
         score = 10
         # A company page may link both company contracts and youth programmes.
@@ -135,6 +137,7 @@ def _set_extracted_official_url(opportunity: dict[str, Any], official_url: str) 
 def extract_useful_text(
     html: str,
     max_characters: int = 45_000,
+    *, role_text: str = "",
 ) -> str:
     """Convert listing HTML into clean text for OpenAI."""
 
@@ -142,6 +145,50 @@ def extract_useful_text(
         html,
         "html.parser",
     )
+    if role_text:
+        # News archives often place years of auditions in sibling sections.
+        # Select only a uniquely best matching recruitment announcement.
+        headings = [heading for heading in soup.find_all(["h2", "h3"]) if re.search(r"audition|looking for dancers|seeking dancers|hiring dancers", heading.get_text(" ", strip=True), re.I)]
+        if len(headings) > 1:
+            from opportunity_source_facts import DATE
+            from dateutil import parser as date_parser
+            def dates(text):
+                values = set()
+                for match in re.finditer(DATE, text, re.I):
+                    try: values.add(date_parser.parse(match.group()).date().isoformat())
+                    except (ValueError, OverflowError): pass
+                return values
+            wanted_dates = dates(role_text)
+            wanted_words = set(re.findall(r"[a-z]{5,}", role_text.lower()))
+            sections = []
+            for heading in headings:
+                pieces = [str(heading)]
+                for sibling in heading.next_siblings:
+                    if getattr(sibling, "name", None) == heading.name: break
+                    pieces.append(str(sibling))
+                fragment = "".join(pieces)
+                text = BeautifulSoup(fragment, "html.parser").get_text(" ", strip=True)
+                if len(text) < 150: continue
+                score = 1000 * len(wanted_dates & dates(text)) + len(wanted_words & set(re.findall(r"[a-z]{5,}", text.lower())))
+                sections.append((score, fragment))
+            sections.sort(key=lambda item: item[0], reverse=True)
+            if sections and wanted_dates and sections[0][0] >= 1000 and (len(sections) == 1 or sections[0][0] > sections[1][0]):
+                soup = BeautifulSoup(sections[0][1], "html.parser")
+
+    structured = []
+    def collect_event(value):
+        if isinstance(value, list):
+            for item in value: collect_event(item)
+        elif isinstance(value, dict):
+            kinds = value.get("@type", [])
+            kinds = kinds if isinstance(kinds, list) else [kinds]
+            if any(kind in {"JobPosting", "Event", "DanceEvent", "TheaterEvent", "MusicEvent"} for kind in kinds if isinstance(kind, str)):
+                facts = {key: value[key] for key in ("name", "title", "description", "location", "jobLocation", "applicantLocationRequirements", "startDate", "endDate", "validThrough", "datePosted", "employmentType", "baseSalary", "qualifications", "skills", "experienceRequirements", "educationRequirements", "hiringOrganization", "url") if key in value}
+                structured.append("Published job/event data: " + json.dumps(facts, ensure_ascii=False))
+            collect_event(value.get("@graph", []))
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try: collect_event(json.loads(script.string or script.get_text()))
+        except (ValueError, TypeError): pass
 
     # Remove elements that usually contain irrelevant content.
     for element in soup(
@@ -211,6 +258,7 @@ def extract_useful_text(
         for part in [
             title,
             description,
+            *structured,
             *lines,
         ]
         if part
@@ -866,7 +914,7 @@ def analyse_opportunity(
     research_error = None
     candidates = list(dict.fromkeys([candidate, *(research_urls or [])]))
     attempts = set()
-    research_limit = 2 if research_urls is not None else 1
+    research_limit = 3 if research_urls is not None else 1
     while candidates and len(attempts) < research_limit:
         candidate = candidates.pop(0)
         if not candidate or candidate == resolved_url or candidate in attempts:
@@ -874,11 +922,11 @@ def analyse_opportunity(
         attempts.add(candidate)
         try:
             secondary, destination = fetch_public_html(candidate, DEFAULT_HEADERS, timeout=12)
-            sources.append({"url": destination, "requested_url": candidate, "type": "linked_page", "text": extract_useful_text(secondary, 16_000)})
+            sources.append({"url": destination, "requested_url": candidate, "type": "linked_page", "text": extract_useful_text(secondary, 16_000, role_text=page_text)})
             if research_urls is not None:
                 next_page = extract_official_application_url(secondary, destination, prefer_link=True, role_text=page_text)
                 if next_page and next_page != destination and next_page not in attempts:
-                    candidates.append(next_page)
+                    candidates.insert(0, next_page)
         except PublicSourceError as error:
             research_error = f"{research_error}; {error}" if research_error else str(error)
     evidence_text = "\n\n".join(f"Source URL: {source['url']}\n{source['text']}" for source in sources)
@@ -990,6 +1038,11 @@ website, not a verified application form. Never use a third-party directory,
 advertisement, social profile or unrelated website for this fallback.
 Before returning, perform a completeness check against EVERY screenshot/caption
 and retrieved page. Explicit application deadlines, technical standards,
+audition venue/city/country, contract setting, compensation, dates and application
+instructions on a linked page must enrich the screenshot's missing fields.
+Linked pages are full information sources, not merely application destinations.
+Distinguish the audition venue from company headquarters and contract location.
+Use published Event/JobPosting data when relevant to this exact opportunity.
 student/experience/physical/work-rights requirements and application materials
 must be captured in their structured fields with short verbatim evidence.
 Use ready_for_publication=true when this is a genuine dancer opportunity with
