@@ -163,6 +163,11 @@ def opportunity_categories(opportunity: dict[str, Any]) -> list[str]:
         selected = [str(value) for value in override if str(value) in OPPORTUNITY_CATEGORIES]
         if selected:
             return list(dict.fromkeys(selected))
+    selected = opportunity.get("stageviva_review", {}).get("ai_categories")
+    if isinstance(selected, list) and selected:
+        valid = [value for value in selected if value in OPPORTUNITY_CATEGORIES]
+        if valid:
+            return list(dict.fromkeys(valid))
     requirements = opportunity.get("requirements", {})
     discipline_requirements = requirements.get("discipline_requirements", {}) if isinstance(requirements, dict) else {}
     styles = _known_list(requirements, "styles")
@@ -206,6 +211,9 @@ def opportunity_track(opportunity: dict[str, Any]) -> str:
     override = str(_admin_overrides(opportunity).get("track") or "")
     if override in OPPORTUNITY_TRACKS:
         return override
+    selected = opportunity.get("stageviva_review", {}).get("ai_track")
+    if selected in OPPORTUNITY_TRACKS:
+        return selected
     text = " ".join((
         field_value(opportunity, "identity", "opportunity_type"),
         field_value(opportunity, "identity", "description"),

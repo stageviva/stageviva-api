@@ -9,7 +9,7 @@ from opportunity_source_facts import complete_source_facts
 from opportunity_lifecycle import is_current_opportunity
 from opportunity_policy import is_non_performer_opportunity, is_school_or_training_opportunity
 
-PUBLICATION_POLICY = "source-ready-v5"
+PUBLICATION_POLICY = "source-ready-v6"
 
 
 def _recover_role_evidence(result: dict) -> None:
@@ -62,7 +62,7 @@ def _application_emails(text):
         prefix = text[max(0, match.start() - 160):match.start()]
         if re.search(r"\b(?:questions|enquiries|inquiries|tickets|press|contact)\b", prefix[-80:], re.I):
             continue
-        if re.search(r"\b(?:send|submit)\s+(?:your\s+)?applications?\b[^.!?]{0,100}$|\bapply\b[^.!?]{0,100}$|\bapplications?\s*(?:(?:by|via)\s+e-?mail\s*)?(?:to|:)[^\w@]{0,15}$", prefix, re.I):
+        if re.search(r"\b(?:send|submit)\s+(?:your\s+)?applications?\b[^.!?]{0,100}$|\bapply\b[^.!?]{0,100}$|\bapplications?\s*(?:(?:by|via)\s+e-?mail\s*)?(?:to|:)[^\w@]{0,15}$|\b(?:e-?mail|cv|resume|showreel)\s*(?:to\s*)?:?\s*$", prefix, re.I):
             matches.append((match, prefix))
     return matches
 
@@ -71,7 +71,7 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
     result = copy.deepcopy(complete_source_facts(opportunity))
     _recover_role_evidence(result)
     review = result.get("stageviva_review", {})
-    if review.get("decision") != VALID or application_pathway(result):
+    if review.get("decision") != VALID:
         return _resolved_application(result)
     review = result["stageviva_review"]
     sources = review.get("sources") or []
@@ -84,9 +84,10 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
             if len({candidate.group().casefold() for candidate, _ in candidates}) != 1:
                 break
             quote = prefix.strip() + " " + match.group()
-            review["pathway"] = {"kind": "email", "target": match.group(), "evidence": [quote]}
+            if not application_pathway(result):
+                review["pathway"] = {"kind": "email", "target": match.group(), "evidence": [quote]}
             result.setdefault("application", {})["email"] = {"value": match.group(), "evidence": [quote], "confidence": "high"}
-            return _resolved_application(result, recovered=True)
+            break
     # Employer-website fallback must be explicitly supplied and actually
     # retrieved. A directory or arbitrary first link is not promoted.
     normalized = unwrap_source_urls(text)
@@ -101,6 +102,14 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
                 labelled.add(("https://" + url if url.startswith("www.") else url).rstrip(".,;:!?)"))
     if reference_url:
         labelled.add(reference_url)
+    # The supplied company website remains useful even when its server blocks
+    # automated reading. It is a website fallback, never a verified apply form.
+    supplied = {url for url in labelled if safe_official_website(url)}
+    if len(supplied) == 1:
+        url = next(iter(supplied))
+        result.setdefault("source", {})["official_url"] = {"value": url, "evidence": ["Website supplied with announcement: " + url], "confidence": "high"}
+    if application_pathway(result):
+        return _resolved_application(result, recovered=bool(candidates))
     for source in sources:
         if not isinstance(source, dict):
             continue
@@ -118,6 +127,10 @@ def prepare_publication(opportunity: dict, reference_url: str = "") -> dict:
         review["pathway"] = {"kind": "official_website", "target": url, "evidence": [quote]}
         result.setdefault("source", {})["official_url"] = {"value": url, "evidence": [quote], "confidence": "high"}
         break
+    if not application_pathway(result) and len(supplied) == 1:
+        url = next(iter(supplied))
+        review["pathway"] = {"kind": "official_website", "target": url, "evidence": ["Website supplied with announcement: " + url]}
+        result.setdefault("source", {})["official_url"] = {"value": url, "evidence": ["Website supplied with announcement: " + url], "confidence": "high"}
     return _resolved_application(result, recovered=bool(application_pathway(result)))
 
 

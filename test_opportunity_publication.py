@@ -20,6 +20,23 @@ from test_opportunity_imports import ready, CAPTION
 
 
 class PublicationPolicyTest(unittest.TestCase):
+    def test_email_and_company_site_survive_together_without_an_audition_page(self):
+        document = ready()
+        document["stageviva_review"].update(pathway={"kind": "official_website", "target": "https://company.org/"}, sources=[{"type": "caption", "url": "stageviva-upload://one", "text": "Dancer auditions. Email: casting@company.org\nWebsite: https://company.org/"}])
+        fixed = prepare_publication(document)
+        self.assertEqual(fixed["application"]["email"]["value"], "casting@company.org")
+        self.assertEqual(fixed["source"]["official_url"]["value"], "https://company.org/")
+        self.assertEqual(fixed["stageviva_review"]["pathway"]["kind"], "official_website")
+
+    def test_ai_multistyle_classification_uses_the_shared_match_filters(self):
+        from opportunity_presentation import opportunity_track, opportunity_categories
+        document = ready()
+        document["stageviva_review"].update(ai_track="contract", ai_categories=["ballet", "contemporary"])
+        self.assertEqual(opportunity_track(document), "contract")
+        self.assertEqual(opportunity_categories(document), ["ballet", "contemporary"])
+        document["stageviva_admin"] = {"track": "agency", "categories": ["jazz"]}
+        self.assertEqual(opportunity_track(document), "agency")
+        self.assertEqual(opportunity_categories(document), ["jazz"])
     def test_failed_import_diagnostics_do_not_expose_provider_bodies_or_credentials(self):
         error = RuntimeError("secret https://signed.example/private?token=hidden")
         error.status_code = 400
@@ -80,7 +97,7 @@ class PublicationPolicyTest(unittest.TestCase):
             {"type": "linked_page", "url": "https://company.org/auditions", "requested_url": "https://www.company.org/auditions", "text": "Company auditions. Apply here."}])
         self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"]["target"], "https://company.org/auditions")
         document["stageviva_review"]["sources"].pop()
-        self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"], {})
+        self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"]["kind"], "official_website")
 
     def test_import_updates_survive_reopen_and_are_private_and_readable(self):
         jid, oid = self.held()
@@ -197,7 +214,7 @@ class PublicationPolicyTest(unittest.TestCase):
         document["stageviva_review"]["sources"] = [{"url": "stageviva-upload://one", "type": "caption", "text": "Official website: https://company.org/"}, {"url": "https://company.org/", "type": "linked_page", "text": "Official company website"}]
         self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"]["kind"], "official_website")
         document["stageviva_review"]["sources"].pop()
-        self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"], {})
+        self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"]["kind"], "official_website")
         document["stageviva_review"]["sources"] = [{"url": "stageviva-upload://one", "type": "caption", "text": "Application deadline: 16 November 2026. For questions, contact tickets@example.org"}]
         self.assertEqual(prepare_publication(document)["stageviva_review"]["pathway"], {})
 
@@ -213,7 +230,7 @@ class PublicationPolicyTest(unittest.TestCase):
             document["stageviva_review"]["blocking_reasons"] = blockers
             self.assertIsNotNone(publication_reason(prepare_publication(document, "https://company.org/ballet")))
         document["stageviva_review"].update(blocking_reasons=[], sources=[])
-        self.assertIsNotNone(publication_reason(prepare_publication(document, "https://company.org/ballet")))
+        self.assertIsNone(publication_reason(prepare_publication(document, "https://company.org/ballet")))
 
     def test_saved_hold_recovers_website_and_publishes_without_ai(self):
         document = ready()

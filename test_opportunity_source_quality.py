@@ -147,7 +147,7 @@ class SourceQualityTest(unittest.TestCase):
         self.assertEqual(application_pathway(result)["kind"], "official_website")
         with patch("opportunity_intelligence.reserve_ai_request"), patch("opportunity_intelligence.fetch_public_html", side_effect=PublicSourceError("Blocked")):
             blocked = analyse_opportunity("stageviva-upload://fixture", listing_text=text, research_urls=["https://company.org/"], client=client)
-        self.assertFalse(application_pathway(blocked))
+        self.assertEqual(application_pathway(blocked)["kind"], "official_website")
 
 
 if __name__ == "__main__": unittest.main()

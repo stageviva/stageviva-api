@@ -121,6 +121,8 @@ OPPORTUNITY_SCHEMA = _object({
     "missing_information": _string_array(),
     "overall_confidence": {"type": "string", "enum": CONFIDENCE_LEVELS},
     "classification": _object({
+        "track": {"type": "string", "enum": ["contract", "apprenticeship", "agency", "unknown"]},
+        "categories": {"type": "array", "items": {"type": "string", "enum": ["ballet", "contemporary", "jazz", "commercial", "hip_hop", "musical_theatre", "tap", "cruise", "acting", "singing", "modelling", "circus_acro", "agency", "performing_arts"]}},
         "ready_for_publication": BOOL,
         "blocking_reasons": {"type": "array", "items": {"type": "string", "enum": ["role_unclear", "identity_missing", "critical_requirements_unclear", "application_missing", "source_conflict", "unreadable_source"]}},
         "decision": {"type": "string", "enum": [
