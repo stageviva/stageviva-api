@@ -3,6 +3,8 @@ uvicorn==0.52.4
 pwdlib[argon2]==0.3.1
 PyJWT==2.13.0
 cryptography==45.0.7
+pyOpenSSL==25.1.0
+app-store-server-library==3.1.2
 python-multipart==0.0.32
 email-validator==2.3.0
 httpx[http2]>=0.28.1

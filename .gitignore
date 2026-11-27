@@ -1,4 +1,5 @@
 .env
+*.p8
 .venv/
 .venv-1/
 .venv.venv/

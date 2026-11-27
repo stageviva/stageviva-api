@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -319,6 +320,23 @@ class StageVivaStorage:
                 event_type TEXT NOT NULL,
                 processed_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS apple_subscriptions (
+                original_transaction_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                transaction_id TEXT NOT NULL,
+                account_token TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                signed_at INTEGER NOT NULL,
+                auto_renew INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_apple_user ON apple_subscriptions(user_id);
+            CREATE TABLE IF NOT EXISTS apple_accounts (
+                user_id TEXT PRIMARY KEY, account_token TEXT NOT NULL UNIQUE
+            );
             CREATE TABLE IF NOT EXISTS push_subscriptions (
                 id TEXT PRIMARY KEY, user_id TEXT NOT NULL, endpoint TEXT NOT NULL UNIQUE,
                 subscription_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -348,6 +366,17 @@ class StageVivaStorage:
         # Only memberships explicitly marked ``stripe`` are downgraded when a
         # paid subscription ends.
         self._ensure_column("users", "membership_source", "TEXT NOT NULL DEFAULT 'manual'")
+        billing_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(billing_subscriptions)")}
+        if "entitled" not in billing_columns:
+            self._ensure_column("billing_subscriptions", "entitled", "INTEGER NOT NULL DEFAULT 0")
+            # Preserve only previously granted, recognised Stripe purchases.
+            # An old active row with an unknown price must not acquire access.
+            self.connection.execute("""
+                UPDATE billing_subscriptions SET entitled = 1
+                WHERE status IN ('active', 'trialing')
+                    AND plan IN ('premium_monthly', 'audition_season')
+                    AND user_id IN (SELECT id FROM users WHERE membership_source = 'stripe' AND membership_tier = 'pro')
+            """)
         self._ensure_column("opportunities", "visible", "INTEGER NOT NULL DEFAULT 1")
         # Record why a listing is hidden so automatic catalogue maintenance
         # never restores something the founder deliberately removed.  Rows
@@ -906,15 +935,69 @@ class StageVivaStorage:
         user = self.get_user(user_id)
         if not user:
             return None
-        tier = str(user.get("membership_tier") or "free").lower()
-        source = str(user.get("membership_source") or "manual").lower()
-        if entitled:
-            if tier not in {"admin", "school"}:
-                return self.update_membership_tier(user_id, "pro", source="stripe")
+        self.connection.execute("UPDATE billing_subscriptions SET entitled = ? WHERE user_id = ?", (int(entitled), user_id))
+        self.connection.commit()
+        return self.reconcile_paid_membership(user_id)
+
+    def reconcile_paid_membership(self, user_id: str) -> dict[str, Any] | None:
+        """Union of paid providers; preserve independent manual/School grants."""
+        user = self.get_user(user_id)
+        if not user:
+            return None
+        source = str(user.get("membership_source") or "manual")
+        tier = str(user.get("membership_tier") or "free")
+        if tier in {"admin", "school", "beta"} or (tier == "pro" and source == "manual"):
             return user
-        if source == "stripe" and tier == "pro":
-            return self.update_membership_tier(user_id, "free", source="manual")
+        stripe = self.get_billing_subscription_for_user(user_id)
+        apple = self.connection.execute(
+            "SELECT 1 FROM apple_subscriptions WHERE user_id = ? AND status = 'active' AND expires_at > ? LIMIT 1",
+            (user_id, int(time.time())),
+        ).fetchone()
+        new_source = ("stripe" if stripe and stripe["entitled"] and stripe["status"] in {"active", "trialing"}
+                      else "apple" if apple else "manual")
+        new_tier = "pro" if new_source != "manual" else "free"
+        if (new_tier, new_source) != (tier, source):
+            return self.update_membership_tier(user_id, new_tier, source=new_source)
         return user
+
+    def save_apple_subscription(self, user_id: str, details: dict[str, Any]) -> None:
+        """Bind an original purchase once; never move it between accounts."""
+        original = details["original_transaction_id"]
+        with self.connection:
+            self.connection.execute("""
+                INSERT INTO apple_subscriptions (
+                    original_transaction_id, user_id, transaction_id, account_token,
+                    product_id, environment, status, expires_at, signed_at, auto_renew, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(original_transaction_id) DO UPDATE SET
+                    transaction_id=excluded.transaction_id, status=excluded.status,
+                    expires_at=excluded.expires_at, signed_at=excluded.signed_at,
+                    auto_renew=excluded.auto_renew, updated_at=excluded.updated_at
+                WHERE apple_subscriptions.user_id=excluded.user_id
+                    AND apple_subscriptions.environment=excluded.environment
+                    AND apple_subscriptions.signed_at <= excluded.signed_at
+            """, (original, user_id, details["transaction_id"], details["account_token"],
+                  details["product_id"], details["environment"], details["status"], details["expires_at"],
+                  details["signed_at"], int(details["auto_renew"]), _utc_now()))
+            row = self.connection.execute(
+                "SELECT user_id, environment FROM apple_subscriptions WHERE original_transaction_id = ?", (original,),
+            ).fetchone()
+            if row["user_id"] != user_id or row["environment"] != details["environment"]:
+                raise ValueError("This Apple subscription is already connected to another account.")
+        self.reconcile_paid_membership(user_id)
+
+    def apple_subscriptions_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM apple_subscriptions WHERE user_id = ? ORDER BY expires_at DESC", (user_id,),
+        ).fetchall()]
+
+    def register_apple_account(self, user_id: str, token: str) -> None:
+        self.connection.execute("INSERT OR IGNORE INTO apple_accounts (user_id, account_token) VALUES (?, ?)", (user_id, token))
+        self.connection.commit()
+
+    def apple_user_for_token(self, token: str) -> str | None:
+        row = self.connection.execute("SELECT user_id FROM apple_accounts WHERE account_token = ?", (token.lower(),)).fetchone()
+        return str(row["user_id"]) if row else None
 
     def get_billing_subscription_for_user(self, user_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
@@ -953,8 +1036,8 @@ class StageVivaStorage:
         self.connection.execute("""
             INSERT INTO billing_subscriptions (
                 user_id, provider, provider_customer_id, provider_subscription_id,
-                plan, price_id, status, current_period_end, cancel_at_period_end, updated_at
-            ) VALUES (?, 'stripe', ?, ?, ?, ?, ?, ?, ?, ?)
+                plan, price_id, status, current_period_end, cancel_at_period_end, updated_at, entitled
+            ) VALUES (?, 'stripe', ?, ?, ?, ?, ?, ?, ?, ?, 0)
             ON CONFLICT(user_id) DO UPDATE SET
                 provider='stripe',
                 provider_customer_id=excluded.provider_customer_id,
@@ -964,7 +1047,8 @@ class StageVivaStorage:
                 status=excluded.status,
                 current_period_end=excluded.current_period_end,
                 cancel_at_period_end=excluded.cancel_at_period_end,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                entitled=0
         """, (
             user_id, provider_customer_id or None, provider_subscription_id or None,
             plan or None, price_id or None, status, current_period_end,
@@ -997,6 +1081,8 @@ class StageVivaStorage:
         self.connection.execute("DELETE FROM opportunity_tracking WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM deadline_reminder_events WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM billing_subscriptions WHERE user_id = ?", (user_id,))
+        self.connection.execute("DELETE FROM apple_subscriptions WHERE user_id = ?", (user_id,))
+        self.connection.execute("DELETE FROM apple_accounts WHERE user_id = ?", (user_id,))
         self.connection.execute("DELETE FROM push_subscriptions WHERE user_id = ?", (user_id,))
         if artist_id:
             self.connection.execute("DELETE FROM notification_outbox WHERE artist_id = ?", (artist_id,))

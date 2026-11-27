@@ -31,6 +31,7 @@ from pydantic import BaseModel, EmailStr, Field
 from pwdlib import PasswordHash
 
 from artist_intelligence import analyse_artist, enrich_artist_dna
+import apple_billing
 from billing import (
     BillingConfigurationError,
     BillingProviderError,
@@ -545,7 +546,7 @@ def current_user(
         user = None
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token.")
-    return user
+    return storage.reconcile_paid_membership(user["id"]) or user
 
 
 CurrentUser = Annotated[dict[str, Any], Depends(current_user)]
@@ -775,7 +776,7 @@ def start_billing_checkout(
 ) -> dict[str, str]:
     """Create a hosted Stripe Checkout without handling card data in StageViva."""
     existing = storage.get_billing_subscription_for_user(user["id"])
-    if existing and existing["status"] in STRIPE_ENTITLED_STATUSES:
+    if (existing and existing["status"] in STRIPE_ENTITLED_STATUSES) or _membership_tier(user) != "free":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This account already has an active StageViva subscription.",
@@ -798,6 +799,67 @@ def start_billing_checkout(
     if not checkout_url.startswith("https://checkout.stripe.com/"):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Stripe returned an invalid checkout link.")
     return {"checkout_url": checkout_url, "session_id": str(session.get("id") or "")}
+
+
+class ApplePurchaseRequest(BaseModel):
+    signed_transaction: str = Field(min_length=20, max_length=40000)
+
+
+class AppleNotificationRequest(BaseModel):
+    signedPayload: str = Field(min_length=20, max_length=120000)
+
+
+def _apple_billing_error(error: Exception) -> HTTPException:
+    code = (503 if isinstance(error, apple_billing.AppleConfigurationError)
+            else 502 if isinstance(error, apple_billing.AppleProviderError) else 422)
+    return HTTPException(status_code=code, detail=str(error))
+
+
+@app.get("/me/billing/apple")
+def get_apple_billing(user: CurrentUser, storage: Storage) -> dict[str, Any]:
+    token = apple_billing.account_token(user["id"])
+    storage.register_apple_account(user["id"], token)
+    subscriptions = storage.apple_subscriptions_for_user(user["id"])
+    return {
+        "available": apple_billing.configured(), "product_id": apple_billing.PRODUCT_ID,
+        "account_token": token,
+        "premium": _membership_tier(user) != "free",
+        "subscription": ({key: subscriptions[0][key] for key in (
+            "product_id", "status", "expires_at", "auto_renew", "environment",
+        )} if subscriptions else None),
+    }
+
+
+@app.post("/billing/apple/verify")
+def verify_apple_purchase(payload: ApplePurchaseRequest, user: CurrentUser, storage: Storage) -> dict[str, Any]:
+    try:
+        details = apple_billing.verify_purchase(payload.signed_transaction, user["id"])
+        storage.register_apple_account(user["id"], apple_billing.account_token(user["id"]))
+        storage.save_apple_subscription(user["id"], details)
+    except (apple_billing.AppleConfigurationError, apple_billing.AppleProviderError,
+            apple_billing.AppleVerificationError, ValueError) as error:
+        raise _apple_billing_error(error) from error
+    updated = storage.get_user(user["id"]) or user
+    return {"verified": True, "premium": _membership_tier(updated) != "free", "status": details["status"]}
+
+
+@app.post("/billing/apple/notifications")
+def apple_notifications(payload: AppleNotificationRequest, storage: Storage) -> dict[str, bool]:
+    try:
+        event_id, details = apple_billing.verify_notification(payload.signedPayload)
+        event_key = f"apple:{event_id}"
+        if storage.billing_event_processed(event_key):
+            return {"received": True}
+        if details:
+            user_id = storage.apple_user_for_token(details["account_token"])
+            # Deleted/unrecognised accounts are never recreated by notifications.
+            if user_id and storage.get_user(user_id):
+                storage.save_apple_subscription(user_id, details)
+        storage.record_billing_event(event_key, "apple")
+    except (apple_billing.AppleConfigurationError, apple_billing.AppleProviderError,
+            apple_billing.AppleVerificationError, ValueError) as error:
+        raise _apple_billing_error(error) from error
+    return {"received": True}
 
 
 @app.post("/billing/portal")
